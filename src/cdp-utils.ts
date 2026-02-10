@@ -1,0 +1,95 @@
+/**
+ * CDP (Chrome DevTools Protocol) helpers.
+ *
+ * Used to expose ready-to-use endpoints for attaching Playwright/CDP clients
+ * to a Chrome instance launched by proxy-mcp.
+ */
+
+export interface FetchJsonOptions {
+  timeoutMs?: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorToString(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
+export function getCdpBaseUrl(port: number): string {
+  return `http://127.0.0.1:${port}`;
+}
+
+export function getCdpVersionUrl(port: number): string {
+  return `${getCdpBaseUrl(port)}/json/version`;
+}
+
+export function getCdpTargetsUrl(port: number): string {
+  return `${getCdpBaseUrl(port)}/json/list`;
+}
+
+export async function fetchJson<T = unknown>(url: string, opts: FetchJsonOptions = {}): Promise<T> {
+  const timeoutMs = opts.timeoutMs ?? 1000;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { "accept": "application/json" },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status} from ${url}${text ? `: ${text.slice(0, 200)}` : ""}`);
+    }
+
+    return await res.json() as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function getCdpVersion(port: number, opts: FetchJsonOptions = {}): Promise<Record<string, unknown>> {
+  return await fetchJson<Record<string, unknown>>(getCdpVersionUrl(port), opts);
+}
+
+export async function getCdpTargets(port: number, opts: FetchJsonOptions = {}): Promise<Array<Record<string, unknown>>> {
+  return await fetchJson<Array<Record<string, unknown>>>(getCdpTargetsUrl(port), opts);
+}
+
+export interface WaitForCdpOptions {
+  timeoutMs?: number;
+  intervalMs?: number;
+  requestTimeoutMs?: number;
+}
+
+export async function waitForCdpVersion(port: number, opts: WaitForCdpOptions = {}): Promise<Record<string, unknown>> {
+  const timeoutMs = opts.timeoutMs ?? 3000;
+  const intervalMs = opts.intervalMs ?? 200;
+  const requestTimeoutMs = opts.requestTimeoutMs ?? Math.min(1000, timeoutMs);
+
+  const startedAt = Date.now();
+  let lastErr: unknown;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      return await getCdpVersion(port, { timeoutMs: requestTimeoutMs });
+    } catch (e) {
+      lastErr = e;
+      await sleep(intervalMs);
+    }
+  }
+
+  throw new Error(`CDP not responding at ${getCdpVersionUrl(port)} within ${timeoutMs}ms${lastErr ? `: ${errorToString(lastErr)}` : ""}`);
+}
+
