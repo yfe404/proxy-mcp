@@ -39,6 +39,39 @@ function normalizeHostname(url: string): string | null {
   }
 }
 
+function estimateBase64Bytes(data: string): number {
+  const len = data.length;
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((len * 3) / 4) - padding);
+}
+
+function sanitizeDevToolsPayload(payload: unknown): unknown {
+  if (Array.isArray(payload)) {
+    return payload.map((item) => sanitizeDevToolsPayload(item));
+  }
+  if (!payload || typeof payload !== "object") {
+    return payload;
+  }
+
+  const obj = payload as Record<string, unknown>;
+  if (obj.type === "image" && typeof obj.data === "string") {
+    const bytes = estimateBase64Bytes(obj.data);
+    const { data, ...rest } = obj;
+    return {
+      ...rest,
+      dataRedacted: true,
+      redactionReason: "Omitted base64 image payload to keep MCP context small.",
+      approximateImageBytes: bytes,
+    };
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    out[k] = sanitizeDevToolsPayload(v);
+  }
+  return out;
+}
+
 function findProjectRoot(): string {
   const start = dirname(fileURLToPath(import.meta.url));
   let dir = start;
@@ -329,7 +362,7 @@ export function registerDevToolsTools(server: McpServer): void {
           devtools_session_id,
           target_id: targetId,
           url,
-          devtoolsResult,
+          devtoolsResult: sanitizeDevToolsPayload(devtoolsResult),
           traffic: {
             beforeCount,
             afterCount: beforeCount + delta.length,
@@ -381,7 +414,7 @@ export function registerDevToolsTools(server: McpServer): void {
               status: "success",
               devtools_session_id,
               target_id: targetId,
-              devtoolsResult,
+              devtoolsResult: sanitizeDevToolsPayload(devtoolsResult),
             }),
           }],
         };
@@ -420,7 +453,7 @@ export function registerDevToolsTools(server: McpServer): void {
               status: "success",
               devtools_session_id,
               target_id: targetId,
-              devtoolsResult,
+              devtoolsResult: sanitizeDevToolsPayload(devtoolsResult),
             }),
           }],
         };
@@ -459,7 +492,7 @@ export function registerDevToolsTools(server: McpServer): void {
               status: "success",
               devtools_session_id,
               target_id: targetId,
-              devtoolsResult,
+              devtoolsResult: sanitizeDevToolsPayload(devtoolsResult),
             }),
           }],
         };
@@ -496,7 +529,7 @@ export function registerDevToolsTools(server: McpServer): void {
               status: "success",
               devtools_session_id,
               target_id: targetId,
-              devtoolsResult,
+              devtoolsResult: sanitizeDevToolsPayload(devtoolsResult),
             }),
           }],
         };

@@ -294,6 +294,8 @@ Proxy-safe wrappers around a managed `chrome-devtools-mcp` sidecar, bound to a s
 | `interceptor_chrome_devtools_screenshot` | Capture screenshot from bound DevTools session |
 | `interceptor_chrome_devtools_detach` | Close one bound DevTools sidecar session |
 
+Note: image payloads from DevTools responses are redacted from MCP output to avoid pushing large base64 blobs into context.
+
 ### Sessions (10)
 
 Persistent, queryable on-disk capture for long runs and post-crash analysis.
