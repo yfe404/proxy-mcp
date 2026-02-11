@@ -2,7 +2,7 @@
 
 proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. It also ships "interceptors" to route Chrome, CLI tools, Docker containers, and Android devices/apps through the proxy.
 
-54 tools + 7 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
+63 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
 
 ### Boundaries
 
@@ -38,6 +38,103 @@ A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through p
    import { chromium } from "playwright";
    const browser = await chromium.connectOverCDP("http://127.0.0.1:<cdp-port>");
    ```
+
+**Proxy-safe built-in CDP flow (single-instance safe):**
+
+1. Call `proxy_start`
+2. Call `interceptor_chrome_launch`
+3. Call `interceptor_chrome_devtools_attach` with that `target_id`
+4. Call `interceptor_chrome_devtools_navigate` with `devtools_session_id`
+5. Call `proxy_search_traffic --query "<hostname>"` to confirm capture
+
+## HTTP Proxy Configuration
+
+### 1) Start proxy and get endpoint
+
+```bash
+proxy_start
+```
+
+Use the returned `port` and endpoint `http://127.0.0.1:<port>`.
+
+### 2) Browser setup (recommended: interceptor)
+
+Use the Chrome interceptor so proxy flags and cert trust are configured automatically:
+
+```bash
+interceptor_chrome_launch --url "https://example.com"
+```
+
+Then bind DevTools safely to that same target:
+
+```bash
+interceptor_chrome_devtools_attach --target_id "chrome_<pid>"
+interceptor_chrome_devtools_navigate --devtools_session_id "devtools_<id>" --url "https://apify.com"
+```
+
+### 3) Browser setup (manual fallback)
+
+If launching Chrome manually, pass proxy flag yourself:
+
+```bash
+google-chrome --proxy-server="http://127.0.0.1:<port>"
+```
+
+For HTTPS MITM, the proxy CA must be trusted in the target environment (`proxy_get_ca_cert`).
+
+### 4) Process/app HTTP proxy env vars
+
+Most CLI/SDK clients follow:
+
+```bash
+HTTP_PROXY=http://127.0.0.1:<port>
+HTTPS_PROXY=http://127.0.0.1:<port>
+NO_PROXY=localhost,127.0.0.1
+```
+
+Or let proxy-mcp configure env/cert automatically:
+
+```bash
+interceptor_spawn --command curl --args '["-s","https://example.com"]'
+```
+
+### 5) Explicit HTTP client examples
+
+```bash
+curl --proxy http://127.0.0.1:<port> http://example.com
+curl --proxy http://127.0.0.1:<port> https://example.com
+```
+
+### 6) Upstream HTTP proxy chaining
+
+Set optional proxy chaining from proxy-mcp to another upstream proxy:
+
+```bash
+proxy_set_upstream --proxy_url "http://user:pass@upstream-host:8080"
+```
+
+Model:
+- Client/app -> `proxy-mcp` (local explicit proxy)
+- `proxy-mcp` -> upstream proxy (optional chaining layer)
+
+### 7) Validate and troubleshoot quickly
+
+```bash
+proxy_list_traffic --limit 20
+proxy_search_traffic --query "example.com"
+```
+
+Common issues:
+- Traffic from the wrong browser instance (fix: use `interceptor_chrome_devtools_attach`)
+- HTTPS cert trust missing on target
+- `NO_PROXY` bypassing expected hosts
+- `chrome-devtools-mcp` not installed (`ENOENT`): `interceptor_chrome_devtools_attach` falls back to navigation-only mode. Install `chrome-devtools-mcp` for full snapshot/network/console/screenshot support.
+
+Pull/install sidecar directly from MCP:
+
+```bash
+interceptor_chrome_devtools_pull_sidecar --version "0.2.2"
+```
 
 ## Setup
 
@@ -120,7 +217,7 @@ npm run build
 
 JA3 spoofing works by re-issuing the request from the proxy via CycleTLS with a specified JA3 string. The origin server sees the proxy's spoofed fingerprint, not the original client's. JA4 fingerprints are captured (read-only) but spoofing is not supported.
 
-### Interceptors (17)
+### Interceptors (18)
 
 Interceptors configure targets (browsers, processes, devices, containers) to route their traffic through the proxy automatically.
 
@@ -132,12 +229,13 @@ Interceptors configure targets (browsers, processes, devices, containers) to rou
 | `interceptor_status` | Detailed status of a specific interceptor |
 | `interceptor_deactivate_all` | Emergency cleanup: kill all active interceptors across all types |
 
-#### Chrome (3)
+#### Chrome (4)
 
 | Tool | Description |
 |------|-------------|
 | `interceptor_chrome_launch` | Launch Chrome/Chromium/Brave/Edge with proxy flags and SPKI cert trust |
 | `interceptor_chrome_cdp_info` | Get CDP endpoints (HTTP + WebSocket) and tab targets for a launched Chrome |
+| `interceptor_chrome_navigate` | Navigate a tab via the launched Chrome target's CDP page WebSocket and verify proxy capture |
 | `interceptor_chrome_close` | Close a Chrome instance by target ID |
 
 Launches with isolated temp profile, auto-cleaned on close. Supports `chrome`, `chromium`, `brave`, `edge`.
@@ -181,6 +279,21 @@ Sets 18+ env vars covering curl, Node.js, Python requests, Deno, Git, npm/yarn.
 
 Two modes: `exec` (live injection, existing processes need restart) and `restart` (stop + restart container). Uses `host.docker.internal` for proxy URL.
 
+### DevTools Bridge (8)
+
+Proxy-safe wrappers around a managed `chrome-devtools-mcp` sidecar, bound to a specific `interceptor_chrome_launch` target.
+
+| Tool | Description |
+|------|-------------|
+| `interceptor_chrome_devtools_pull_sidecar` | Install/pull `chrome-devtools-mcp` so full DevTools bridge actions are available |
+| `interceptor_chrome_devtools_attach` | Start a bound DevTools sidecar session for one Chrome interceptor target |
+| `interceptor_chrome_devtools_navigate` | Navigate via bound DevTools session and verify matching proxy traffic |
+| `interceptor_chrome_devtools_snapshot` | Get accessibility snapshot from bound DevTools session |
+| `interceptor_chrome_devtools_list_network` | List network requests from bound DevTools session |
+| `interceptor_chrome_devtools_list_console` | List console messages from bound DevTools session |
+| `interceptor_chrome_devtools_screenshot` | Capture screenshot from bound DevTools session |
+| `interceptor_chrome_devtools_detach` | Close one bound DevTools sidecar session |
+
 ### Sessions (10)
 
 Persistent, queryable on-disk capture for long runs and post-crash analysis.
@@ -206,6 +319,7 @@ Persistent, queryable on-disk capture for long runs and post-crash analysis.
 | `proxy://ca-cert` | CA certificate PEM |
 | `proxy://traffic/summary` | Traffic stats: method/status breakdown, top hostnames, TLS fingerprint stats |
 | `proxy://interceptors` | All interceptor metadata and activation status |
+| `proxy://chrome/devtools/sessions` | Active DevTools sidecar sessions bound to Chrome target IDs |
 | `proxy://sessions` | Persistent session catalog + runtime persistence status |
 | `proxy://chrome/primary` | CDP endpoints for the most recently launched Chrome instance |
 | `proxy://chrome/targets` | CDP endpoints + tab targets for active Chrome instances |

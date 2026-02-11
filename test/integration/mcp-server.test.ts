@@ -11,6 +11,7 @@ import { registerUpstreamTools } from "../../src/tools/upstream.js";
 import { registerModificationTools } from "../../src/tools/modification.js";
 import { registerTlsTools } from "../../src/tools/tls.js";
 import { registerInterceptorTools } from "../../src/tools/interceptors.js";
+import { registerDevToolsTools } from "../../src/tools/devtools.js";
 import { registerSessionTools } from "../../src/tools/sessions.js";
 import { registerResources } from "../../src/resources.js";
 import { initInterceptors } from "../../src/interceptors/init.js";
@@ -25,6 +26,7 @@ async function createTestSetup() {
   registerModificationTools(server);
   registerTlsTools(server);
   registerInterceptorTools(server);
+  registerDevToolsTools(server);
   registerSessionTools(server);
   registerResources(server);
 
@@ -48,7 +50,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 54 tools", async () => {
+  it("lists all 63 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -76,10 +78,20 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("interceptor_deactivate_all"));
     assert.ok(names.includes("interceptor_chrome_launch"));
     assert.ok(names.includes("interceptor_chrome_cdp_info"));
+    assert.ok(names.includes("interceptor_chrome_navigate"));
     assert.ok(names.includes("interceptor_spawn"));
     assert.ok(names.includes("interceptor_android_devices"));
     assert.ok(names.includes("interceptor_frida_apps"));
     assert.ok(names.includes("interceptor_docker_attach"));
+    // DevTools bridge tools
+    assert.ok(names.includes("interceptor_chrome_devtools_attach"));
+    assert.ok(names.includes("interceptor_chrome_devtools_pull_sidecar"));
+    assert.ok(names.includes("interceptor_chrome_devtools_navigate"));
+    assert.ok(names.includes("interceptor_chrome_devtools_snapshot"));
+    assert.ok(names.includes("interceptor_chrome_devtools_list_network"));
+    assert.ok(names.includes("interceptor_chrome_devtools_list_console"));
+    assert.ok(names.includes("interceptor_chrome_devtools_screenshot"));
+    assert.ok(names.includes("interceptor_chrome_devtools_detach"));
     // Session persistence tools
     assert.ok(names.includes("proxy_session_start"));
     assert.ok(names.includes("proxy_session_stop"));
@@ -91,7 +103,7 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_export_har"));
     assert.ok(names.includes("proxy_delete_session"));
     assert.ok(names.includes("proxy_session_recover"));
-    assert.equal(names.length, 54);
+    assert.equal(names.length, 63);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {
@@ -166,6 +178,7 @@ describe("MCP Server Integration", () => {
     assert.ok(uris.includes("proxy://interceptors"));
     assert.ok(uris.includes("proxy://chrome/primary"));
     assert.ok(uris.includes("proxy://chrome/targets"));
+    assert.ok(uris.includes("proxy://chrome/devtools/sessions"));
     assert.ok(uris.includes("proxy://sessions"));
   });
 

@@ -6,6 +6,7 @@ import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/serv
 import { proxyManager } from "./state.js";
 import { interceptorManager } from "./interceptors/manager.js";
 import { getCdpBaseUrl, getCdpTargets, getCdpTargetsUrl, getCdpVersion, getCdpVersionUrl, waitForCdpVersion } from "./cdp-utils.js";
+import { devToolsBridge } from "./devtools/bridge.js";
 
 export function registerResources(server: McpServer): void {
   server.resource(
@@ -126,6 +127,23 @@ export function registerResources(server: McpServer): void {
         contents: [{
           uri: uri.href,
           text: JSON.stringify(list, null, 2),
+        }],
+      };
+    },
+  );
+
+  server.resource(
+    "proxy_chrome_devtools_sessions",
+    "proxy://chrome/devtools/sessions",
+    async (uri) => {
+      const sessions = devToolsBridge.listSessions();
+      return {
+        contents: [{
+          uri: uri.href,
+          text: JSON.stringify({
+            count: sessions.length,
+            sessions,
+          }, null, 2),
         }],
       };
     },

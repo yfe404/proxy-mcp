@@ -9,6 +9,37 @@ export interface FetchJsonOptions {
   timeoutMs?: number;
 }
 
+interface CdpCommandErrorPayload {
+  code?: number;
+  message?: string;
+  data?: unknown;
+}
+
+interface CdpCommandResponse {
+  id?: number;
+  result?: Record<string, unknown>;
+  error?: CdpCommandErrorPayload;
+}
+
+interface MinimalWebSocketEvent {
+  data?: unknown;
+}
+
+interface MinimalWebSocket {
+  addEventListener(type: string, listener: (event: unknown) => void): void;
+  removeEventListener(type: string, listener: (event: unknown) => void): void;
+  close(code?: number, reason?: string): void;
+  send(data: string): void;
+}
+
+interface MinimalWebSocketCtor {
+  new(url: string): MinimalWebSocket;
+}
+
+export interface SendCdpCommandOptions {
+  timeoutMs?: number;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -21,6 +52,26 @@ function errorToString(e: unknown): string {
   } catch {
     return String(e);
   }
+}
+
+function getWebSocketCtor(): MinimalWebSocketCtor {
+  const ctor = (globalThis as unknown as { WebSocket?: unknown }).WebSocket;
+  if (typeof ctor !== "function") {
+    throw new Error("WebSocket is not available in this Node runtime. Use Node.js 22+.");
+  }
+  return ctor as MinimalWebSocketCtor;
+}
+
+function messageDataToString(event: unknown): string {
+  const data = (event as MinimalWebSocketEvent | undefined)?.data ?? event;
+
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf-8");
+  if (ArrayBuffer.isView(data)) {
+    return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf-8");
+  }
+  if (data === null || data === undefined) return "";
+  return String(data);
 }
 
 export function getCdpBaseUrl(port: number): string {
@@ -93,3 +144,96 @@ export async function waitForCdpVersion(port: number, opts: WaitForCdpOptions = 
   throw new Error(`CDP not responding at ${getCdpVersionUrl(port)} within ${timeoutMs}ms${lastErr ? `: ${errorToString(lastErr)}` : ""}`);
 }
 
+/**
+ * Send a single CDP command to a target WebSocket endpoint and wait for its reply.
+ * Useful for deterministic one-shot actions (e.g. Page.navigate) from MCP tools.
+ */
+export async function sendCdpCommand(
+  wsUrl: string,
+  method: string,
+  params?: Record<string, unknown>,
+  opts: SendCdpCommandOptions = {},
+): Promise<Record<string, unknown>> {
+  const timeoutMs = opts.timeoutMs ?? 3000;
+  const WS = getWebSocketCtor();
+  const commandId = Math.floor(Math.random() * 1_000_000_000);
+
+  return await new Promise<Record<string, unknown>>((resolve, reject) => {
+    const socket = new WS(wsUrl);
+    let done = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const finishOk = (result: Record<string, unknown>): void => {
+      if (done) return;
+      done = true;
+      cleanup();
+      try { socket.close(1000, "done"); } catch { /* ignore */ }
+      resolve(result);
+    };
+
+    const finishErr = (err: unknown): void => {
+      if (done) return;
+      done = true;
+      cleanup();
+      try { socket.close(1000, "error"); } catch { /* ignore */ }
+      reject(err instanceof Error ? err : new Error(errorToString(err)));
+    };
+
+    const onOpen = (): void => {
+      try {
+        socket.send(JSON.stringify({
+          id: commandId,
+          method,
+          ...(params ? { params } : {}),
+        }));
+      } catch (e) {
+        finishErr(e);
+      }
+    };
+
+    const onMessage = (event: unknown): void => {
+      let payload: CdpCommandResponse;
+      try {
+        payload = JSON.parse(messageDataToString(event)) as CdpCommandResponse;
+      } catch {
+        // Ignore unrelated/invalid frames.
+        return;
+      }
+      if (payload.id !== commandId) return;
+      if (payload.error) {
+        const msg = payload.error.message || "Unknown CDP error";
+        finishErr(new Error(`CDP ${method} failed: ${msg}`));
+        return;
+      }
+      finishOk(payload.result ?? {});
+    };
+
+    const onError = (): void => {
+      finishErr(new Error(`WebSocket error while sending CDP command '${method}' to ${wsUrl}`));
+    };
+
+    const onClose = (): void => {
+      if (!done) {
+        finishErr(new Error(`WebSocket closed before CDP command '${method}' completed`));
+      }
+    };
+
+    const cleanup = (): void => {
+      socket.removeEventListener("open", onOpen);
+      socket.removeEventListener("message", onMessage);
+      socket.removeEventListener("error", onError);
+      socket.removeEventListener("close", onClose);
+      if (timer) clearTimeout(timer);
+      timer = null;
+    };
+
+    socket.addEventListener("open", onOpen);
+    socket.addEventListener("message", onMessage);
+    socket.addEventListener("error", onError);
+    socket.addEventListener("close", onClose);
+
+    timer = setTimeout(() => {
+      finishErr(new Error(`Timeout waiting for CDP '${method}' response after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+}

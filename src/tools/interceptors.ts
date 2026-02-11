@@ -1,9 +1,9 @@
 /**
- * Interceptor tools — 17 MCP tools for auto-attaching to Chrome, Android, Docker, and processes.
+ * Interceptor tools — 18 MCP tools for auto-attaching to Chrome, Android, Docker, and processes.
  *
  * Organized into 6 groups:
  *   Discovery (3): list, status, deactivate_all
- *   Chrome (3): launch, cdp_info, close
+ *   Chrome (4): launch, cdp_info, navigate, close
  *   Terminal (2): spawn, kill
  *   Android ADB (4): devices, setup, activate, deactivate
  *   Android Frida (3): apps, attach, detach
@@ -17,7 +17,8 @@ import { interceptorManager } from "../interceptors/manager.js";
 import type { TerminalInterceptor } from "../interceptors/terminal.js";
 import type { AndroidAdbInterceptor } from "../interceptors/android-adb.js";
 import type { AndroidFridaInterceptor } from "../interceptors/android-frida.js";
-import { getCdpBaseUrl, getCdpTargets, getCdpTargetsUrl, getCdpVersionUrl, waitForCdpVersion } from "../cdp-utils.js";
+import { getCdpBaseUrl, getCdpTargets, getCdpTargetsUrl, getCdpVersionUrl, sendCdpCommand, waitForCdpVersion } from "../cdp-utils.js";
+import { devToolsBridge } from "../devtools/bridge.js";
 import { truncateResult } from "../utils.js";
 
 /** Robust error-to-string — handles Error, plain objects (e.g. DBus errors), and primitives. */
@@ -49,6 +50,18 @@ function requireProxy(): { proxyPort: number; certPem: string; certFingerprint: 
     certPem: cert.cert,
     certFingerprint: cert.fingerprint,
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeHostname(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 export function registerInterceptorTools(server: McpServer): void {
@@ -110,6 +123,7 @@ export function registerInterceptorTools(server: McpServer): void {
     {},
     async () => {
       try {
+        await devToolsBridge.closeAllSessions().catch(() => {});
         await interceptorManager.deactivateAll();
         return {
           content: [{
@@ -124,7 +138,7 @@ export function registerInterceptorTools(server: McpServer): void {
   );
 
   // ──────────────────────────────────────────
-  // Chrome (2 tools)
+  // Chrome (4 tools)
   // ──────────────────────────────────────────
 
   server.tool(
@@ -238,6 +252,172 @@ export function registerInterceptorTools(server: McpServer): void {
   );
 
   server.tool(
+    "interceptor_chrome_navigate",
+    "Navigate a tab in a specific Chrome instance launched by interceptor_chrome_launch using that instance's CDP target WebSocket. Prevents cross-instance mistakes when proxy capture is required.",
+    {
+      target_id: z.string().describe("Target ID from interceptor_chrome_launch"),
+      url: z.string().describe("Destination URL"),
+      page_target_id: z.string().optional().describe("Optional page target ID from interceptor_chrome_cdp_info targets"),
+      wait_for_proxy_capture: z.boolean().optional().default(true)
+        .describe("Wait for matching proxy traffic after navigate (default: true)"),
+      timeout_ms: z.number().optional().default(5000).describe("Max wait for CDP response and proxy capture (default: 5000ms)"),
+      poll_interval_ms: z.number().optional().default(200).describe("Polling interval while waiting for proxy capture (default: 200ms)"),
+    },
+    async ({ target_id, url, page_target_id, wait_for_proxy_capture, timeout_ms, poll_interval_ms }) => {
+      try {
+        const chrome = interceptorManager.get("chrome");
+        if (!chrome) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "Chrome interceptor not registered." }) }] };
+        }
+
+        const meta = await chrome.getMetadata();
+        const target = meta.activeTargets.find((t) => t.id === target_id);
+        if (!target) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ status: "error", error: `Chrome target '${target_id}' not found. Is it still running?` }),
+            }],
+          };
+        }
+
+        // Chrome interceptor stores CDP port in details.port
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const details: any = target.details ?? {};
+        const port = details.port;
+        if (typeof port !== "number" || !Number.isFinite(port) || port <= 0) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `Chrome target '${target_id}' has no valid CDP port.` }) }] };
+        }
+
+        await waitForCdpVersion(port, {
+          timeoutMs: timeout_ms,
+          intervalMs: Math.max(50, Math.min(500, poll_interval_ms)),
+          requestTimeoutMs: Math.min(1000, Math.max(100, poll_interval_ms)),
+        });
+
+        const cdpTargets = await getCdpTargets(port, { timeoutMs: Math.min(timeout_ms, 2000) });
+        const pageTargets = cdpTargets.filter((t) => t.type === "page");
+        if (pageTargets.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ status: "error", error: `No page targets available on Chrome target '${target_id}'.` }),
+            }],
+          };
+        }
+
+        let selectedTarget: Record<string, unknown> | undefined;
+        if (page_target_id) {
+          selectedTarget = pageTargets.find((t) => t.id === page_target_id);
+          if (!selectedTarget) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  status: "error",
+                  error: `Page target '${page_target_id}' not found on Chrome target '${target_id}'.`,
+                }),
+              }],
+            };
+          }
+        } else {
+          selectedTarget = pageTargets.find((t) => {
+            const tUrl = typeof t.url === "string" ? t.url.toLowerCase() : "";
+            return tUrl.length > 0 && !tUrl.startsWith("devtools://") && !tUrl.startsWith("chrome://");
+          }) ?? pageTargets[0];
+        }
+
+        const pageTargetWs = selectedTarget.webSocketDebuggerUrl;
+        if (typeof pageTargetWs !== "string" || pageTargetWs.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: `Selected page target has no webSocketDebuggerUrl on Chrome target '${target_id}'.`,
+              }),
+            }],
+          };
+        }
+
+        const beforeCount = proxyManager.getTraffic().length;
+        const cdpResult = await sendCdpCommand(
+          pageTargetWs,
+          "Page.navigate",
+          { url },
+          { timeoutMs: timeout_ms },
+        );
+
+        const destinationHost = normalizeHostname(url);
+        let matchedExchangeIds: string[] = [];
+        let sawAnyNewTraffic = false;
+        let waitedMs = 0;
+
+        if (wait_for_proxy_capture) {
+          const startedAt = Date.now();
+          while (Date.now() - startedAt <= timeout_ms) {
+            const delta = proxyManager.getTraffic().slice(beforeCount);
+            if (delta.length > 0) {
+              sawAnyNewTraffic = true;
+            }
+            if (destinationHost) {
+              const matches = delta
+                .filter((x) => {
+                  const host = x.request.hostname.toLowerCase();
+                  return host === destinationHost || host.endsWith(`.${destinationHost}`);
+                })
+                .map((x) => x.id);
+              if (matches.length > 0) {
+                matchedExchangeIds = matches;
+                break;
+              }
+            } else if (delta.length > 0) {
+              matchedExchangeIds = delta.map((x) => x.id);
+              break;
+            }
+            await sleep(Math.max(50, poll_interval_ms));
+            waitedMs = Date.now() - startedAt;
+          }
+        }
+
+        const delta = proxyManager.getTraffic().slice(beforeCount);
+        const response: Record<string, unknown> = {
+          status: "success",
+          target_id,
+          url,
+          selected_page_target_id: selectedTarget.id ?? null,
+          selected_page_url: selectedTarget.url ?? null,
+          cdpResult,
+          traffic: {
+            beforeCount,
+            afterCount: beforeCount + delta.length,
+            deltaCount: delta.length,
+            destinationHost,
+            matchedHostExchangeCount: matchedExchangeIds.length,
+            matchedHostExchangeIds: matchedExchangeIds,
+            waitedMs,
+          },
+        };
+
+        if (wait_for_proxy_capture && destinationHost && matchedExchangeIds.length === 0) {
+          response.warning = sawAnyNewTraffic
+            ? `Navigation succeeded but no '${destinationHost}' traffic was captured within ${timeout_ms}ms.`
+            : `No new proxy traffic observed within ${timeout_ms}ms after navigation.`;
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: truncateResult(response),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
     "interceptor_chrome_close",
     "Close a Chrome instance launched by interceptor_chrome_launch.",
     {
@@ -245,6 +425,7 @@ export function registerInterceptorTools(server: McpServer): void {
     },
     async ({ target_id }) => {
       try {
+        await devToolsBridge.closeSessionsByTarget(target_id).catch(() => {});
         await interceptorManager.deactivate("chrome", target_id);
         return {
           content: [{

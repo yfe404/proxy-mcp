@@ -77,18 +77,25 @@ zero manual setup."
 3. Call `interceptor_chrome_cdp_info` with `{"target_id": "<targetId from launch>", "include_targets": false}`
    — Show CDP endpoints for Playwright/DevTools attachment
 
+4. Call `interceptor_chrome_devtools_attach` with `{"target_id": "<targetId from launch>"}`
+   — Start a bound chrome-devtools-mcp sidecar session tied to this exact Chrome instance
+
+5. Call `interceptor_chrome_devtools_navigate` with
+   `{"devtools_session_id":"<sessionId from attach>","url":"https://example.com","wait_for_proxy_capture":true}`
+   — Navigate with cross-instance safety and proxy-capture verification
+
    Optionally mention: the same info is also available as an MCP resource at `proxy://chrome/primary`
    (and per-target via the `proxy://chrome/{target_id}/cdp` resource template).
 
-4. Wait 4 seconds (`sleep 4` via Bash) for the page to load
+6. Wait 4 seconds (`sleep 4` via Bash) for the page to load
 
-5. Call `proxy_list_traffic` with `{"limit": 20}`
+7. Call `proxy_list_traffic` with `{"limit": 20}`
    — Show captured HTTPS exchanges
 
-6. Call `proxy_search_traffic` with `{"query": "example.com", "limit": 5}`
+8. Call `proxy_search_traffic` with `{"query": "example.com", "limit": 5}`
    — Search the captured traffic
 
-7. Pick the **first exchange ID** from results, then call
+9. Pick the **first exchange ID** from results, then call
    `proxy_get_exchange` with `{"exchange_id": "<that_id>"}`
    — Full request/response deep-dive
 
@@ -315,4 +322,4 @@ After cleanup, deliver this summary:
 - Request forwarding and connection dropping
 - Per-host proxy routing
 
-**Stats:** 54 tools, 7 resources, 4 resource templates, 5 interceptor types.
+**Stats:** 63 tools, 8 resources, 4 resource templates, 5 interceptor types.
