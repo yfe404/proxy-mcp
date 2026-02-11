@@ -6,6 +6,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { proxyManager } from "../state.js";
 import type { RuleHandler, RuleMatcher, RequestTransformConfig, ResponseTransformConfig } from "../state.js";
+import { truncateResult } from "../utils.js";
 
 const matcherSchema = z.object({
   method: z.string().optional().describe("HTTP method (GET, POST, etc.)"),
@@ -36,6 +37,15 @@ const handlerSchema = z.object({
   forwardTo: z.string().optional().describe("Target host (for forward, e.g., http://other-server:3000)"),
   transformRequest: requestTransformSchema.describe("Request transform config"),
   transformResponse: responseTransformSchema.describe("Response transform config"),
+});
+
+const testRequestSchema = z.object({
+  method: z.string().optional().default("GET").describe("HTTP method (default: GET)"),
+  url: z.string().describe("Full request URL (required in simulate mode)"),
+  hostname: z.string().optional().describe("Optional hostname override (default: derived from URL)"),
+  path: z.string().optional().describe("Optional path override (default: derived from URL path + query)"),
+  headers: z.record(z.string()).optional().describe("Request headers"),
+  body: z.string().optional().default("").describe("Request body (default: empty)"),
 });
 
 export function registerRuleTools(server: McpServer): void {
@@ -132,6 +142,74 @@ export function registerRuleTools(server: McpServer): void {
           text: JSON.stringify({ status: "success", count: rules.length, rules }),
         }],
       };
+    },
+  );
+
+  server.tool(
+    "proxy_test_rule_match",
+    "Test which interception rules would match a request, with detailed per-field pass/fail diagnostics and effective winner by priority.",
+    {
+      mode: z.enum(["simulate", "exchange"]).optional().default("simulate")
+        .describe("simulate: test a synthetic request, exchange: test an existing captured exchange"),
+      request: testRequestSchema.optional().describe("Synthetic request (required when mode=simulate)"),
+      exchange_id: z.string().optional().describe("Exchange ID from proxy_list_traffic (required when mode=exchange)"),
+      include_disabled: z.boolean().optional().default(true)
+        .describe("Include disabled rules in diagnostics (default: true); disabled rules never win"),
+      limit_rules: z.number().optional().describe("Optional limit on number of priority-sorted rules evaluated"),
+    },
+    async ({ mode, request, exchange_id, include_disabled, limit_rules }) => {
+      try {
+        const options = {
+          includeDisabled: include_disabled,
+          limitRules: limit_rules,
+        };
+
+        if (mode === "exchange") {
+          if (!exchange_id) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({ status: "error", error: "exchange_id is required when mode='exchange'" }),
+              }],
+            };
+          }
+          const result = proxyManager.testRulesAgainstExchange(exchange_id, options);
+          return {
+            content: [{
+              type: "text",
+              text: truncateResult({
+                status: "success",
+                mode,
+                exchange_id,
+                result,
+              }),
+            }],
+          };
+        }
+
+        if (!request) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ status: "error", error: "request is required when mode='simulate'" }),
+            }],
+          };
+        }
+
+        const result = proxyManager.testRulesAgainstRequest(request, options);
+        return {
+          content: [{
+            type: "text",
+            text: truncateResult({
+              status: "success",
+              mode,
+              result,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: String(e) }) }] };
+      }
     },
   );
 

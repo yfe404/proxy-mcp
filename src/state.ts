@@ -67,6 +67,64 @@ export interface RuleMatcher {
   bodyIncludes?: string;
 }
 
+export interface RuleTestRequest {
+  method: string;
+  url: string;
+  hostname: string;
+  path: string;
+  headers: Record<string, string>;
+  body: string;
+}
+
+export interface RuleMatchFieldCheck {
+  applies: boolean;
+  passed: boolean;
+  expected?: unknown;
+  actual?: unknown;
+  reason?: string;
+  mismatch?: Array<{ header: string; expected: string; actual: string | null }>;
+}
+
+export interface RuleMatchChecks {
+  method: RuleMatchFieldCheck;
+  urlPattern: RuleMatchFieldCheck;
+  hostname: RuleMatchFieldCheck;
+  pathPattern: RuleMatchFieldCheck;
+  headers: RuleMatchFieldCheck;
+  bodyIncludes: RuleMatchFieldCheck;
+}
+
+export interface RuleMatchEvaluation {
+  ruleId: string;
+  enabled: boolean;
+  priority: number;
+  description: string;
+  matched: boolean;
+  eligible: boolean;
+  checks: RuleMatchChecks;
+}
+
+export interface RuleTestOptions {
+  includeDisabled?: boolean;
+  limitRules?: number;
+}
+
+export interface RuleTestResult {
+  request: RuleTestRequest;
+  includeDisabled: boolean;
+  evaluatedCount: number;
+  totalRules: number;
+  results: RuleMatchEvaluation[];
+  matchedCount: number;
+  effectiveMatchCount: number;
+  effectiveWinner: {
+    ruleId: string;
+    priority: number;
+    description: string;
+    handlerType: RuleHandlerType;
+  } | null;
+}
+
 export type RuleHandlerType = "passthrough" | "mock" | "forward" | "drop";
 
 export interface RuleHandler {
@@ -352,6 +410,71 @@ export class ProxyManager {
     if (!rule) throw new Error(`Rule '${id}' not found`);
     rule.enabled = false;
     if (this._running) await this.rebuildMockttpRules();
+  }
+
+  testRulesAgainstRequest(
+    requestInput: { url: string } & Partial<Omit<RuleTestRequest, "url">>,
+    options: RuleTestOptions = {},
+  ): RuleTestResult {
+    const request = this.normalizeRuleTestRequest(requestInput);
+    const includeDisabled = options.includeDisabled ?? true;
+    const limitRules = options.limitRules;
+
+    const allRules = this.listRules();
+    const candidates = includeDisabled ? allRules : allRules.filter((r) => r.enabled);
+    const rules = (typeof limitRules === "number" && limitRules >= 0)
+      ? candidates.slice(0, limitRules)
+      : candidates;
+
+    const results: RuleMatchEvaluation[] = rules.map((rule) => {
+      const { matched, checks } = this.evaluateRuleMatcher(rule.matcher, request);
+      const eligible = matched && rule.enabled;
+      return {
+        ruleId: rule.id,
+        enabled: rule.enabled,
+        priority: rule.priority,
+        description: rule.description,
+        matched,
+        eligible,
+        checks,
+      };
+    });
+
+    const matchedCount = results.filter((r) => r.matched).length;
+    const effectiveMatches = results.filter((r) => r.eligible);
+    const winner = effectiveMatches[0] ?? null;
+    const winnerRule = winner ? this.getRule(winner.ruleId) ?? null : null;
+
+    return {
+      request,
+      includeDisabled,
+      evaluatedCount: results.length,
+      totalRules: allRules.length,
+      results,
+      matchedCount,
+      effectiveMatchCount: effectiveMatches.length,
+      effectiveWinner: winner && winnerRule ? {
+        ruleId: winner.ruleId,
+        priority: winner.priority,
+        description: winner.description,
+        handlerType: winnerRule.handler.type,
+      } : null,
+    };
+  }
+
+  testRulesAgainstExchange(exchangeId: string, options: RuleTestOptions = {}): RuleTestResult {
+    const exchange = this.getExchange(exchangeId);
+    if (!exchange) {
+      throw new Error(`Exchange '${exchangeId}' not found`);
+    }
+    return this.testRulesAgainstRequest({
+      method: exchange.request.method,
+      url: exchange.request.url,
+      hostname: exchange.request.hostname,
+      path: exchange.request.path,
+      headers: exchange.request.headers,
+      body: exchange.request.bodyPreview,
+    }, options);
   }
 
   // ── Traffic ──
@@ -820,6 +943,10 @@ export class ProxyManager {
     if (matcher.hostname) {
       builder = builder.forHostname(matcher.hostname);
     }
+    if (matcher.pathPattern) {
+      const pathRe = new RegExp(matcher.pathPattern);
+      builder = builder.matching((req) => pathRe.test(req.path));
+    }
     if (matcher.headers) {
       builder = builder.withHeaders(matcher.headers);
     }
@@ -828,6 +955,172 @@ export class ProxyManager {
     }
 
     return builder;
+  }
+
+  private normalizeRuleTestRequest(
+    requestInput: { url: string } & Partial<Omit<RuleTestRequest, "url">>,
+  ): RuleTestRequest {
+    let parsed: URL;
+    try {
+      parsed = new URL(requestInput.url);
+    } catch {
+      throw new Error(`Invalid URL '${requestInput.url}'`);
+    }
+
+    const method = (requestInput.method ?? "GET").toUpperCase();
+    const hostname = (requestInput.hostname ?? parsed.hostname).toLowerCase();
+    const path = requestInput.path ?? `${parsed.pathname}${parsed.search}`;
+    const body = requestInput.body ?? "";
+
+    const headers: Record<string, string> = {};
+    if (requestInput.headers) {
+      for (const [k, v] of Object.entries(requestInput.headers)) {
+        headers[k.toLowerCase()] = String(v);
+      }
+    }
+
+    return {
+      method,
+      url: requestInput.url,
+      hostname,
+      path,
+      headers,
+      body,
+    };
+  }
+
+  private evaluateRuleMatcher(matcher: RuleMatcher, request: RuleTestRequest): {
+    matched: boolean;
+    checks: RuleMatchChecks;
+  } {
+    const passByDefault: RuleMatchFieldCheck = { applies: false, passed: true };
+    const checks: RuleMatchChecks = {
+      method: { ...passByDefault },
+      urlPattern: { ...passByDefault },
+      hostname: { ...passByDefault },
+      pathPattern: { ...passByDefault },
+      headers: { ...passByDefault },
+      bodyIncludes: { ...passByDefault },
+    };
+
+    if (matcher.method) {
+      const expected = matcher.method.toUpperCase();
+      const actual = request.method.toUpperCase();
+      checks.method = {
+        applies: true,
+        passed: actual === expected,
+        expected,
+        actual,
+        ...(actual === expected ? {} : { reason: "HTTP method mismatch" }),
+      };
+    }
+
+    if (matcher.urlPattern) {
+      try {
+        const re = new RegExp(matcher.urlPattern);
+        const passed = re.test(request.url);
+        checks.urlPattern = {
+          applies: true,
+          passed,
+          expected: matcher.urlPattern,
+          actual: request.url,
+          ...(passed ? {} : { reason: "URL does not match regex" }),
+        };
+      } catch (e) {
+        checks.urlPattern = {
+          applies: true,
+          passed: false,
+          expected: matcher.urlPattern,
+          actual: request.url,
+          reason: `Invalid regex: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
+    }
+
+    if (matcher.hostname) {
+      const expected = matcher.hostname.toLowerCase();
+      const actual = request.hostname.toLowerCase();
+      const passed = actual === expected;
+      checks.hostname = {
+        applies: true,
+        passed,
+        expected,
+        actual,
+        ...(passed ? {} : { reason: "Hostname mismatch" }),
+      };
+    }
+
+    if (matcher.pathPattern) {
+      try {
+        const re = new RegExp(matcher.pathPattern);
+        const passed = re.test(request.path);
+        checks.pathPattern = {
+          applies: true,
+          passed,
+          expected: matcher.pathPattern,
+          actual: request.path,
+          ...(passed ? {} : { reason: "Path does not match regex" }),
+        };
+      } catch (e) {
+        checks.pathPattern = {
+          applies: true,
+          passed: false,
+          expected: matcher.pathPattern,
+          actual: request.path,
+          reason: `Invalid regex: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
+    }
+
+    if (matcher.headers) {
+      const missingOrMismatched: Array<{ header: string; expected: string; actual: string | null }> = [];
+      for (const [key, expectedValue] of Object.entries(matcher.headers)) {
+        const actual = request.headers[key.toLowerCase()];
+        if (actual === undefined || actual !== expectedValue) {
+          missingOrMismatched.push({
+            header: key.toLowerCase(),
+            expected: expectedValue,
+            actual: actual ?? null,
+          });
+        }
+      }
+      const passed = missingOrMismatched.length === 0;
+      checks.headers = {
+        applies: true,
+        passed,
+        expected: matcher.headers,
+        actual: request.headers,
+        ...(passed
+          ? {}
+          : {
+              reason: "Required headers missing or mismatched",
+              // Provide exact header mismatches for deterministic debugging.
+              mismatch: missingOrMismatched,
+            }),
+      };
+    }
+
+    if (matcher.bodyIncludes) {
+      const expected = matcher.bodyIncludes;
+      const actual = request.body;
+      const passed = actual.includes(expected);
+      checks.bodyIncludes = {
+        applies: true,
+        passed,
+        expected,
+        actual: actual.length > 200 ? `${actual.slice(0, 200)}...` : actual,
+        ...(passed ? {} : { reason: "Body does not include required substring" }),
+      };
+    }
+
+    const matched = checks.method.passed
+      && checks.urlPattern.passed
+      && checks.hostname.passed
+      && checks.pathPattern.passed
+      && checks.headers.passed
+      && checks.bodyIncludes.passed;
+
+    return { matched, checks };
   }
 
   private async buildHandler(

@@ -50,7 +50,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 63 tools", async () => {
+  it("lists all 64 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -63,6 +63,7 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_get_ca_cert"));
     assert.ok(names.includes("proxy_set_upstream"));
     assert.ok(names.includes("proxy_add_rule"));
+    assert.ok(names.includes("proxy_test_rule_match"));
     assert.ok(names.includes("proxy_list_traffic"));
     assert.ok(names.includes("proxy_inject_headers"));
     // TLS tools
@@ -103,7 +104,7 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_export_har"));
     assert.ok(names.includes("proxy_delete_session"));
     assert.ok(names.includes("proxy_session_recover"));
-    assert.equal(names.length, 63);
+    assert.equal(names.length, 64);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {
@@ -193,5 +194,50 @@ describe("MCP Server Integration", () => {
     assert.ok(templates.includes("proxy://sessions/{session_id}/summary"));
     assert.ok(templates.includes("proxy://sessions/{session_id}/timeline"));
     assert.ok(templates.includes("proxy://sessions/{session_id}/findings"));
+  });
+
+  it("tests rule matching in simulate mode", async () => {
+    const { client, cleanup: c } = await createTestSetup();
+    cleanup = c;
+
+    const addRes = await client.callTool({
+      name: "proxy_add_rule",
+      arguments: {
+        description: "Only /api paths",
+        priority: 10,
+        matcher: {
+          method: "GET",
+          hostname: "example.com",
+          pathPattern: "^/api",
+        },
+        handler: {
+          type: "mock",
+          status: 200,
+          body: "ok",
+        },
+      },
+    });
+    const addData = JSON.parse((addRes.content as Array<{ text: string }>)[0].text);
+    assert.equal(addData.status, "success");
+
+    const testRes = await client.callTool({
+      name: "proxy_test_rule_match",
+      arguments: {
+        mode: "simulate",
+        request: {
+          method: "GET",
+          url: "https://example.com/api/v1/items?x=1",
+          headers: { accept: "application/json" },
+        },
+        include_disabled: true,
+      },
+    });
+    const testData = JSON.parse((testRes.content as Array<{ text: string }>)[0].text);
+
+    assert.equal(testData.status, "success");
+    assert.equal(testData.mode, "simulate");
+    assert.ok(testData.result.evaluatedCount >= 1);
+    assert.equal(testData.result.effectiveWinner?.ruleId, addData.rule.id);
+    assert.equal(testData.result.results[0].checks.pathPattern.passed, true);
   });
 });

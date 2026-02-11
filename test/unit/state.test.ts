@@ -123,4 +123,76 @@ describe("ProxyManager", () => {
     const results = pm.searchTraffic("test");
     assert.equal(results.length, 0);
   });
+
+  it("evaluates rules with detailed diagnostics and disabled handling", async () => {
+    pm = new ProxyManager();
+
+    const disabledRule = await pm.addRule({
+      priority: 5,
+      enabled: false,
+      description: "Disabled but matching",
+      matcher: { method: "GET", hostname: "example.com" },
+      handler: { type: "drop" },
+    });
+    const enabledRule = await pm.addRule({
+      priority: 10,
+      enabled: true,
+      description: "Enabled winner",
+      matcher: { method: "GET", hostname: "example.com" },
+      handler: { type: "mock", status: 200, body: "ok" },
+    });
+
+    const withDisabled = pm.testRulesAgainstRequest({
+      method: "GET",
+      url: "https://example.com/path?q=1",
+      headers: { accept: "*/*" },
+      body: "",
+    }, { includeDisabled: true });
+
+    assert.equal(withDisabled.results.length, 2);
+    assert.equal(withDisabled.matchedCount, 2);
+    const disabledEval = withDisabled.results.find((r) => r.ruleId === disabledRule.id)!;
+    assert.equal(disabledEval.matched, true);
+    assert.equal(disabledEval.eligible, false);
+    assert.equal(withDisabled.effectiveWinner?.ruleId, enabledRule.id);
+
+    const withoutDisabled = pm.testRulesAgainstRequest({
+      method: "GET",
+      url: "https://example.com/path?q=1",
+    }, { includeDisabled: false });
+    assert.equal(withoutDisabled.results.length, 1);
+    assert.equal(withoutDisabled.results[0].ruleId, enabledRule.id);
+    assert.equal(withoutDisabled.effectiveWinner?.ruleId, enabledRule.id);
+  });
+
+  it("applies pathPattern parity in rule testing", async () => {
+    pm = new ProxyManager();
+    await pm.addRule({
+      priority: 1,
+      enabled: true,
+      description: "Path constrained",
+      matcher: { pathPattern: "^/api/" },
+      handler: { type: "passthrough" },
+    });
+
+    const match = pm.testRulesAgainstRequest({
+      url: "https://example.com/api/items",
+    });
+    assert.equal(match.effectiveWinner?.description, "Path constrained");
+    assert.equal(match.results[0].checks.pathPattern.passed, true);
+
+    const noMatch = pm.testRulesAgainstRequest({
+      url: "https://example.com/healthz",
+    });
+    assert.equal(noMatch.effectiveWinner, null);
+    assert.equal(noMatch.results[0].checks.pathPattern.passed, false);
+  });
+
+  it("throws for missing exchange when testing rules against exchange", () => {
+    pm = new ProxyManager();
+    assert.throws(
+      () => pm.testRulesAgainstExchange("missing_exchange"),
+      /not found/i,
+    );
+  });
 });

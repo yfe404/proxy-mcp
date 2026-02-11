@@ -2,7 +2,7 @@
 
 proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. It also ships "interceptors" to route Chrome, CLI tools, Docker containers, and Android devices/apps through the proxy.
 
-63 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
+64 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
 
 ### Boundaries
 
@@ -117,6 +117,25 @@ Model:
 - Client/app -> `proxy-mcp` (local explicit proxy)
 - `proxy-mcp` -> upstream proxy (optional chaining layer)
 
+Typical geo-routing examples:
+
+```bash
+# Route ALL outgoing traffic from proxy-mcp via a geo proxy
+proxy_set_upstream --proxy_url "socks5://user:pass@fr-exit.example.net:1080"
+
+# Bypass upstream for local/internal hosts
+proxy_set_upstream --proxy_url "http://user:pass@proxy.example.net:8080" --no_proxy '["localhost","127.0.0.1",".corp.local"]'
+
+# Route only one hostname via a dedicated upstream (overrides global)
+proxy_set_host_upstream --hostname "api.example.com" --proxy_url "https://user:pass@us-exit.example.net:443"
+
+# Remove overrides when done
+proxy_remove_host_upstream --hostname "api.example.com"
+proxy_clear_upstream
+```
+
+Supported upstream URL schemes: `socks4://`, `socks5://`, `http://`, `https://`, `pac+http://`.
+
 ### 7) Validate and troubleshoot quickly
 
 ```bash
@@ -176,7 +195,7 @@ npm run build
 | `proxy_set_host_upstream` | Per-host upstream override |
 | `proxy_remove_host_upstream` | Remove per-host override |
 
-### Interception Rules (6)
+### Interception Rules (7)
 
 | Tool | Description |
 |------|-------------|
@@ -184,8 +203,19 @@ npm run build
 | `proxy_update_rule` | Modify existing rule |
 | `proxy_remove_rule` | Delete rule |
 | `proxy_list_rules` | List all rules by priority |
+| `proxy_test_rule_match` | Test which rules would match a simulated request or captured exchange, with detailed diagnostics |
 | `proxy_enable_rule` | Enable a disabled rule |
 | `proxy_disable_rule` | Disable without removing |
+
+Quick debugging examples:
+
+```bash
+# Simulate a request and see which rule would win
+proxy_test_rule_match --mode simulate --request '{"method":"GET","url":"https://example.com/api/v1/items","headers":{"accept":"application/json"}}'
+
+# Evaluate a real captured exchange by ID
+proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
+```
 
 ### Traffic Capture (4)
 
