@@ -1,7 +1,7 @@
 /**
  * Proxy MCP Server — entry point.
  *
- * HTTPS MITM proxy via mockttp with 44 tools and 5 resources, connected via stdio.
+ * HTTPS MITM proxy via mockttp with lifecycle/rules/traffic/TLS/interceptors/session tools and resources.
  * Tools organized into 7 modules:
  *   lifecycle, upstream, rules, traffic, modification, tls, interceptors
  */
@@ -16,6 +16,7 @@ import { registerTrafficTools } from "./tools/traffic.js";
 import { registerModificationTools } from "./tools/modification.js";
 import { registerTlsTools } from "./tools/tls.js";
 import { registerInterceptorTools } from "./tools/interceptors.js";
+import { registerSessionTools } from "./tools/sessions.js";
 import { registerResources } from "./resources.js";
 import { initInterceptors } from "./interceptors/init.js";
 
@@ -36,6 +37,7 @@ async function main() {
   registerModificationTools(server);
   registerTlsTools(server);
   registerInterceptorTools(server);
+  registerSessionTools(server);
 
   // Register resources
   registerResources(server);

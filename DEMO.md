@@ -74,21 +74,28 @@ zero manual setup."
 2. Call `interceptor_chrome_launch` with `{"url": "https://example.com"}`
    — Chrome launches with --proxy-server and SPKI cert trust flags
 
-3. Wait 4 seconds (`sleep 4` via Bash) for the page to load
+3. Call `interceptor_chrome_cdp_info` with `{"target_id": "<targetId from launch>", "include_targets": false}`
+   — Show CDP endpoints for Playwright/DevTools attachment
 
-4. Call `proxy_list_traffic` with `{"limit": 20}`
+   Optionally mention: the same info is also available as an MCP resource at `proxy://chrome/primary`
+   (and per-target via the `proxy://chrome/{target_id}/cdp` resource template).
+
+4. Wait 4 seconds (`sleep 4` via Bash) for the page to load
+
+5. Call `proxy_list_traffic` with `{"limit": 20}`
    — Show captured HTTPS exchanges
 
-5. Call `proxy_search_traffic` with `{"query": "example.com", "limit": 5}`
+6. Call `proxy_search_traffic` with `{"query": "example.com", "limit": 5}`
    — Search the captured traffic
 
-6. Pick the **first exchange ID** from results, then call
+7. Pick the **first exchange ID** from results, then call
    `proxy_get_exchange` with `{"exchange_id": "<that_id>"}`
    — Full request/response deep-dive
 
-**Say:** "We captured {count} HTTPS exchanges from one page load. Full headers,
-body previews, timing, and TLS info — all captured automatically. Chrome trusted
-our CA via the SPKI fingerprint flag, so no certificate warnings."
+**Say:** "We captured {count} HTTPS exchanges from one page load. You get full
+headers, sizes, timing, TLS fingerprints, and body previews (preview size is
+capped). Chrome trusted our CA via the SPKI fingerprint flag, so no certificate
+warnings."
 
 **If Chrome is not available:** Explain that the interceptor also supports Chromium,
 Brave, and Edge. Fall back to spawning curl instead:
@@ -258,9 +265,9 @@ JA4 hashes that identify the client's TLS stack."
 
 **Say:** "Every TLS handshake is fingerprinted. Chrome, curl, Python, and mobile apps
 all produce distinct JA3 hashes. Anti-bot systems use these to detect automation.
-The proxy can also *spoof* outgoing JA3 fingerprints via CycleTLS using the
-`proxy_set_ja3_spoof` tool — making your requests look like they come from a
-real browser."
+The proxy can also replay matching HTTPS requests via CycleTLS with a spoofed JA3
+using the `proxy_set_ja3_spoof` tool. Note: this does not change the original
+client's TLS fingerprint (it's proxy-side)."
 
 Return to menu.
 
@@ -293,7 +300,7 @@ After cleanup, deliver this summary:
 **What we demonstrated:**
 - HTTPS MITM proxy with auto-generated CA
 - Zero-config browser interception
-- Full traffic capture with search & deep inspection
+- Traffic capture with search & deep inspection (headers + sizes + timing + body previews)
 - Mock responses for any URL pattern
 - Header injection on requests/responses
 - Response body modification in-flight
@@ -305,7 +312,7 @@ After cleanup, deliver this summary:
 - Docker container interception
 - Upstream proxy chaining (SOCKS5/HTTP for geolocation)
 - JA3 fingerprint spoofing via CycleTLS
-- URL rewriting, request forwarding, connection dropping
+- Request forwarding and connection dropping
 - Per-host proxy routing
 
-**Stats:** 44 tools, 5 resources, 5 interceptor types.
+**Stats:** 54 tools, 7 resources, 4 resource templates, 5 interceptor types.

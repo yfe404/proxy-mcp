@@ -2,7 +2,7 @@
 
 proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. It also ships "interceptors" to route Chrome, CLI tools, Docker containers, and Android devices/apps through the proxy.
 
-44 tools + 5 resources. Built on [mockttp](https://github.com/httptoolkit/mockttp).
+54 tools + 7 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
 
 ### Boundaries
 
@@ -32,7 +32,7 @@ A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through p
 
 1. Call `proxy_start`
 2. Call `interceptor_chrome_launch`
-3. Call `interceptor_chrome_cdp_info` (or read `proxy://chrome/targets`) to get `cdp.httpUrl` (Playwright) and `cdp.browserWebSocketDebuggerUrl` (raw CDP clients)
+3. Read `proxy://chrome/primary` (or call `interceptor_chrome_cdp_info`) to get `cdp.httpUrl` (Playwright) and `cdp.browserWebSocketDebuggerUrl` (raw CDP clients)
 4. In Playwright:
    ```ts
    import { chromium } from "playwright";
@@ -181,6 +181,23 @@ Sets 18+ env vars covering curl, Node.js, Python requests, Deno, Git, npm/yarn.
 
 Two modes: `exec` (live injection, existing processes need restart) and `restart` (stop + restart container). Uses `host.docker.internal` for proxy URL.
 
+### Sessions (10)
+
+Persistent, queryable on-disk capture for long runs and post-crash analysis.
+
+| Tool | Description |
+|------|-------------|
+| `proxy_session_start` | Start persistent session capture (preview or full-body mode) |
+| `proxy_session_stop` | Stop and finalize the active persistent session |
+| `proxy_session_status` | Runtime status for persistence (active session, bytes, disk cap errors) |
+| `proxy_list_sessions` | List recorded sessions from disk |
+| `proxy_get_session` | Get manifest/details for one session |
+| `proxy_query_session` | Indexed query over recorded exchanges |
+| `proxy_get_session_exchange` | Fetch one exchange from a session (with optional full bodies) |
+| `proxy_export_har` | Export full session or filtered subset to HAR |
+| `proxy_delete_session` | Delete a stored session |
+| `proxy_session_recover` | Rebuild indexes from records after unclean shutdown |
+
 ## Resources
 
 | URI | Description |
@@ -189,13 +206,22 @@ Two modes: `exec` (live injection, existing processes need restart) and `restart
 | `proxy://ca-cert` | CA certificate PEM |
 | `proxy://traffic/summary` | Traffic stats: method/status breakdown, top hostnames, TLS fingerprint stats |
 | `proxy://interceptors` | All interceptor metadata and activation status |
+| `proxy://sessions` | Persistent session catalog + runtime persistence status |
+| `proxy://chrome/primary` | CDP endpoints for the most recently launched Chrome instance |
 | `proxy://chrome/targets` | CDP endpoints + tab targets for active Chrome instances |
+| `proxy://chrome/{target_id}/cdp` | CDP endpoints for a specific Chrome instance (resource template) |
+| `proxy://sessions/{session_id}/summary` | Aggregate stats for one recorded session (resource template) |
+| `proxy://sessions/{session_id}/timeline` | Time-bucketed request/error timeline (resource template) |
+| `proxy://sessions/{session_id}/findings` | Top errors/slow exchanges/host error rates (resource template) |
 
 ## Usage Example
 
 ```
 # Start the proxy
 proxy_start
+
+# Optional: start persistent session recording
+proxy_session_start --capture_profile full --session_name "reverse-run-1"
 
 # Configure device to use proxy (Wi-Fi settings or interceptors)
 # Install CA cert on device (proxy_get_ca_cert)
@@ -221,6 +247,11 @@ proxy_search_traffic --query "error"
 # TLS fingerprinting
 proxy_list_tls_fingerprints                # See unique JA3/JA4 fingerprints
 proxy_set_ja3_spoof --ja3 "771,4865-..."   # Spoof outgoing JA3
+
+# Query/export recorded session
+proxy_list_sessions
+proxy_query_session --session_id SESSION_ID --hostname_contains "api.example.com"
+proxy_export_har --session_id SESSION_ID
 ```
 
 ## Architecture

@@ -11,6 +11,7 @@ import { registerUpstreamTools } from "../../src/tools/upstream.js";
 import { registerModificationTools } from "../../src/tools/modification.js";
 import { registerTlsTools } from "../../src/tools/tls.js";
 import { registerInterceptorTools } from "../../src/tools/interceptors.js";
+import { registerSessionTools } from "../../src/tools/sessions.js";
 import { registerResources } from "../../src/resources.js";
 import { initInterceptors } from "../../src/interceptors/init.js";
 
@@ -24,6 +25,7 @@ async function createTestSetup() {
   registerModificationTools(server);
   registerTlsTools(server);
   registerInterceptorTools(server);
+  registerSessionTools(server);
   registerResources(server);
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -46,7 +48,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 44 tools", async () => {
+  it("lists all 54 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -78,7 +80,18 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("interceptor_android_devices"));
     assert.ok(names.includes("interceptor_frida_apps"));
     assert.ok(names.includes("interceptor_docker_attach"));
-    assert.equal(names.length, 44);
+    // Session persistence tools
+    assert.ok(names.includes("proxy_session_start"));
+    assert.ok(names.includes("proxy_session_stop"));
+    assert.ok(names.includes("proxy_session_status"));
+    assert.ok(names.includes("proxy_list_sessions"));
+    assert.ok(names.includes("proxy_get_session"));
+    assert.ok(names.includes("proxy_query_session"));
+    assert.ok(names.includes("proxy_get_session_exchange"));
+    assert.ok(names.includes("proxy_export_har"));
+    assert.ok(names.includes("proxy_delete_session"));
+    assert.ok(names.includes("proxy_session_recover"));
+    assert.equal(names.length, 54);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {
@@ -116,6 +129,31 @@ describe("MCP Server Integration", () => {
     assert.equal(stopData.status, "success");
   });
 
+  it("can enable persistence from proxy_start", async (t) => {
+    const { client, cleanup: c } = await createTestSetup();
+    cleanup = c;
+
+    const startResult = await client.callTool({
+      name: "proxy_start",
+      arguments: { port: 0, persistence_enabled: true, capture_profile: "preview", session_name: "test-session" },
+    });
+    const startData = JSON.parse((startResult.content as Array<{ text: string }>)[0].text);
+    if (startData.status !== "success") {
+      const err = String(startData.error ?? "");
+      if (/EPERM|EACCES/i.test(err)) {
+        t.skip("listen() not permitted in this environment");
+        return;
+      }
+    }
+    assert.equal(startData.status, "success");
+    assert.equal(startData.persistence.enabled, true);
+
+    const sessResult = await client.callTool({ name: "proxy_session_status", arguments: {} });
+    const sessData = JSON.parse((sessResult.content as Array<{ text: string }>)[0].text);
+    assert.equal(sessData.enabled, true);
+    assert.equal(sessData.captureProfile, "preview");
+  });
+
   it("lists resources", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
@@ -126,6 +164,21 @@ describe("MCP Server Integration", () => {
     assert.ok(uris.includes("proxy://ca-cert"));
     assert.ok(uris.includes("proxy://traffic/summary"));
     assert.ok(uris.includes("proxy://interceptors"));
+    assert.ok(uris.includes("proxy://chrome/primary"));
     assert.ok(uris.includes("proxy://chrome/targets"));
+    assert.ok(uris.includes("proxy://sessions"));
+  });
+
+  it("lists resource templates", async () => {
+    const { client, cleanup: c } = await createTestSetup();
+    cleanup = c;
+
+    const { resourceTemplates } = await client.listResourceTemplates();
+    const templates = resourceTemplates.map((t) => t.uriTemplate);
+
+    assert.ok(templates.includes("proxy://chrome/{target_id}/cdp"));
+    assert.ok(templates.includes("proxy://sessions/{session_id}/summary"));
+    assert.ok(templates.includes("proxy://sessions/{session_id}/timeline"));
+    assert.ok(templates.includes("proxy://sessions/{session_id}/findings"));
   });
 });

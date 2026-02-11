@@ -17,6 +17,14 @@ import { spoofedRequest, shutdownCycleTLS } from "./tls-spoof.js";
 import { interceptorManager } from "./interceptors/manager.js";
 import { cleanupTempCerts } from "./interceptors/cert-utils.js";
 import { ensureSafeNetworkInterfaces } from "./os-shim.js";
+import {
+  SessionStore,
+  type SessionStartOptions,
+  type SessionManifest,
+  type SessionQuery,
+  type SessionQueryResult,
+  type SessionIndexEntry,
+} from "./session-store.js";
 
 let mockttpMod: typeof import("mockttp") | null = null;
 async function getMockttp(): Promise<typeof import("mockttp")> {
@@ -105,6 +113,10 @@ export interface Ja3SpoofConfig {
   hostPatterns?: string[];
 }
 
+export interface ProxyStartOptions extends SessionStartOptions {
+  persistenceEnabled?: boolean;
+}
+
 export interface CapturedExchange {
   id: string;
   timestamp: number;
@@ -157,6 +169,7 @@ export class ProxyManager {
   private cert: CertificateInfo | null = null;
   private port: number | null = null;
   private _running = false;
+  private readonly sessionStore = new SessionStore();
 
   // Upstream proxy
   private globalUpstream: UpstreamProxyConfig | null = null;
@@ -168,6 +181,7 @@ export class ProxyManager {
   // Traffic capture (ring buffer)
   private traffic: CapturedExchange[] = [];
   private pendingRequests = new Map<string, CapturedExchange>();
+  private pendingRawBodies = new Map<string, { requestBody?: Buffer }>();
 
   // TLS fingerprinting
   private tlsMetadataCache = new Map<string, TlsClientMetadata>();
@@ -176,7 +190,7 @@ export class ProxyManager {
 
   // ── Lifecycle ──
 
-  async start(port?: number): Promise<{ port: number; url: string; cert: CertificateInfo }> {
+  async start(port?: number, options: ProxyStartOptions = {}): Promise<{ port: number; url: string; cert: CertificateInfo }> {
     if (this._running) {
       throw new Error("Proxy is already running. Stop it first.");
     }
@@ -193,6 +207,15 @@ export class ProxyManager {
     await this.buildAndStart();
     this._running = true;
     this.port = this.server!.port;
+
+    if (options.persistenceEnabled) {
+      await this.sessionStore.startSession({
+        sessionName: options.sessionName,
+        captureProfile: options.captureProfile,
+        storageDir: options.storageDir,
+        maxDiskMb: options.maxDiskMb,
+      });
+    }
 
     return {
       port: this.server!.port,
@@ -212,8 +235,10 @@ export class ProxyManager {
       await this.server.stop();
       this.server = null;
     }
+    await this.sessionStore.stopSession().catch(() => {});
     this._running = false;
     this.pendingRequests.clear();
+    this.pendingRawBodies.clear();
     this.tlsMetadataCache.clear();
     this.disableServerTls();
     if (this._ja3SpoofConfig) {
@@ -243,6 +268,7 @@ export class ProxyManager {
       hostUpstreams: Object.fromEntries(this.hostUpstreams),
       ruleCount: this.rules.size,
       trafficCount: this.traffic.length,
+      persistence: this.sessionStore.getRuntimeStatus(),
     };
   }
 
@@ -360,7 +386,92 @@ export class ProxyManager {
     const count = this.traffic.length;
     this.traffic.length = 0;
     this.pendingRequests.clear();
+    this.pendingRawBodies.clear();
     return count;
+  }
+
+  // ── Persistent Sessions ──
+
+  isSessionPersistenceEnabled(): boolean {
+    return this.sessionStore.isActive();
+  }
+
+  getSessionCaptureProfile(): "preview" | "full" | null {
+    return this.sessionStore.getActiveProfile();
+  }
+
+  async startSession(options: SessionStartOptions = {}): Promise<SessionManifest> {
+    return await this.sessionStore.startSession(options);
+  }
+
+  async stopSession(): Promise<SessionManifest | null> {
+    return await this.sessionStore.stopSession();
+  }
+
+  getSessionStatus(): object {
+    return this.sessionStore.getRuntimeStatus();
+  }
+
+  async listSessions(): Promise<Array<SessionManifest & { diskUsageMb: number }>> {
+    return await this.sessionStore.listSessions();
+  }
+
+  async getSession(sessionId: string): Promise<SessionManifest> {
+    return await this.sessionStore.getSession(sessionId);
+  }
+
+  async querySession(sessionId: string, query: SessionQuery): Promise<SessionQueryResult> {
+    return await this.sessionStore.querySession(sessionId, query);
+  }
+
+  async getSessionExchange(
+    sessionId: string,
+    opts: { seq?: number; exchangeId?: string; includeBody?: boolean },
+  ): Promise<{ index: SessionIndexEntry; record?: unknown }> {
+    return await this.sessionStore.getSessionExchange(sessionId, opts);
+  }
+
+  async exportSessionHar(
+    sessionId: string,
+    opts: { outputFile?: string; query?: SessionQuery; includeBodies?: boolean } = {},
+  ): Promise<{ sessionId: string; outputFile: string; entries: number }> {
+    return await this.sessionStore.exportHar(sessionId, opts);
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    await this.sessionStore.deleteSession(sessionId);
+  }
+
+  async recoverSession(sessionId?: string): Promise<{ recovered: Array<{ sessionId: string; exchanges: number; droppedTailBytes: number }> }> {
+    return await this.sessionStore.recoverSession(sessionId);
+  }
+
+  async getSessionSummary(sessionId: string): Promise<{
+    manifest: SessionManifest;
+    totals: {
+      exchanges: number;
+      avgDurationMs: number | null;
+      topHostnames: Array<{ hostname: string; count: number }>;
+      statuses: Record<string, number>;
+      methods: Record<string, number>;
+    };
+  }> {
+    return await this.sessionStore.getSessionSummary(sessionId);
+  }
+
+  async getSessionTimeline(
+    sessionId: string,
+    bucketMs?: number,
+  ): Promise<Array<{ bucketStart: number; count: number; errorCount: number }>> {
+    return await this.sessionStore.getSessionTimeline(sessionId, bucketMs);
+  }
+
+  async getSessionFindings(sessionId: string): Promise<{
+    highErrorEndpoints: Array<{ endpoint: string; errors: number }>;
+    slowestExchanges: Array<{ exchangeId: string; duration: number; url: string }>;
+    hostErrorRates: Array<{ hostname: string; total: number; errors: number; errorRate: number }>;
+  }> {
+    return await this.sessionStore.getSessionFindings(sessionId);
   }
 
   // ── TLS Fingerprinting ──
@@ -554,6 +665,12 @@ export class ProxyManager {
 
   private setupEventListeners(server: mockttp.Mockttp): void {
     server.on("request", (req: CompletedRequest) => {
+      const requestBody = req.body.buffer;
+      const shouldCaptureFullBody = this.sessionStore.getActiveProfile() === "full";
+      if (shouldCaptureFullBody && requestBody.length > 0) {
+        this.pendingRawBodies.set(req.id, { requestBody: Buffer.from(requestBody) });
+      }
+
       // Look up TLS client metadata from cache
       let clientTls: TlsClientMetadata | undefined;
       if (req.remoteIpAddress && req.remotePort) {
@@ -570,8 +687,8 @@ export class ProxyManager {
           hostname: req.hostname || "",
           path: req.path,
           headers: serializeHeaders(req.headers as Record<string, string | string[] | undefined>),
-          bodyPreview: capString(req.body.buffer.toString("utf-8"), MAX_BODY_PREVIEW),
-          bodySize: req.body.buffer.length,
+          bodyPreview: capString(requestBody.toString("utf-8"), MAX_BODY_PREVIEW),
+          bodySize: requestBody.length,
         },
         tls: clientTls ? { client: clientTls } : undefined,
         matchedRuleId: req.matchedRuleId,
@@ -582,12 +699,13 @@ export class ProxyManager {
     server.on("response", (res: CompletedResponse) => {
       const exchange = this.pendingRequests.get(res.id);
       if (exchange) {
+        const responseBody = res.body.buffer;
         exchange.response = {
           statusCode: res.statusCode,
           statusMessage: res.statusMessage,
           headers: serializeHeaders(res.headers as Record<string, string | string[] | undefined>),
-          bodyPreview: capString(res.body.buffer.toString("utf-8"), MAX_BODY_PREVIEW),
-          bodySize: res.body.buffer.length,
+          bodyPreview: capString(responseBody.toString("utf-8"), MAX_BODY_PREVIEW),
+          bodySize: responseBody.length,
         };
         if (res.timingEvents.responseSentTimestamp && res.timingEvents.startTimestamp) {
           exchange.duration = Math.round(res.timingEvents.responseSentTimestamp - res.timingEvents.startTimestamp);
@@ -605,9 +723,17 @@ export class ProxyManager {
           }
         }
         this.pendingRequests.delete(res.id);
+        const pendingBodies = this.pendingRawBodies.get(res.id);
+        if (pendingBodies || this.sessionStore.isActive()) {
+          this.sessionStore.recordExchange(exchange, {
+            requestBody: pendingBodies?.requestBody,
+            responseBody: this.sessionStore.getActiveProfile() === "full" ? Buffer.from(responseBody) : undefined,
+          });
+        }
+        this.pendingRawBodies.delete(res.id);
         this.pushTraffic(exchange);
       } else {
-        this.pushTraffic({
+        const orphanedExchange: CapturedExchange = {
           id: res.id,
           timestamp: Date.now(),
           request: { method: "?", url: "?", hostname: "", path: "", headers: {}, bodyPreview: "", bodySize: 0 },
@@ -618,7 +744,14 @@ export class ProxyManager {
             bodyPreview: capString(res.body.buffer.toString("utf-8"), MAX_BODY_PREVIEW),
             bodySize: res.body.buffer.length,
           },
-        });
+        };
+        if (this.sessionStore.isActive()) {
+          this.sessionStore.recordExchange(orphanedExchange, {
+            responseBody: this.sessionStore.getActiveProfile() === "full" ? Buffer.from(res.body.buffer) : undefined,
+          });
+        }
+        this.pendingRawBodies.delete(res.id);
+        this.pushTraffic(orphanedExchange);
       }
     });
 
@@ -626,6 +759,13 @@ export class ProxyManager {
       const exchange = this.pendingRequests.get(req.id);
       if (exchange) {
         this.pendingRequests.delete(req.id);
+        if (this.sessionStore.isActive()) {
+          const pendingBodies = this.pendingRawBodies.get(req.id);
+          this.sessionStore.recordExchange(exchange, {
+            requestBody: pendingBodies?.requestBody,
+          });
+        }
+        this.pendingRawBodies.delete(req.id);
         this.pushTraffic(exchange);
       }
     });

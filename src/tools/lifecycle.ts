@@ -13,10 +13,24 @@ export function registerLifecycleTools(server: McpServer): void {
     "Start the HTTPS MITM proxy. Auto-generates a CA certificate. Returns port, URL, cert fingerprint, and setup instructions for the target device.",
     {
       port: z.number().optional().describe("Port to listen on (0 = random available port)"),
+      persistence_enabled: z.boolean().optional().default(false)
+        .describe("Enable persistent on-disk session capture (default: false)"),
+      session_name: z.string().optional().describe("Optional name for the session when persistence is enabled"),
+      capture_profile: z.enum(["preview", "full"]).optional().default("preview")
+        .describe("Capture profile for persisted sessions: preview (body previews) or full (full bodies)"),
+      storage_dir: z.string().optional().describe("Custom session storage directory"),
+      max_disk_mb: z.number().optional().default(1024)
+        .describe("Per-session disk cap in MB (writes are dropped once exceeded)"),
     },
-    async ({ port }) => {
+    async ({ port, persistence_enabled, session_name, capture_profile, storage_dir, max_disk_mb }) => {
       try {
-        const result = await proxyManager.start(port);
+        const result = await proxyManager.start(port, {
+          persistenceEnabled: persistence_enabled ?? false,
+          sessionName: session_name,
+          captureProfile: capture_profile,
+          storageDir: storage_dir,
+          maxDiskMb: max_disk_mb,
+        });
         const localIP = getLocalIP();
         return {
           content: [{
@@ -26,6 +40,7 @@ export function registerLifecycleTools(server: McpServer): void {
               port: result.port,
               url: result.url,
               certFingerprint: result.cert.fingerprint,
+              persistence: proxyManager.getSessionStatus(),
               setup: {
                 proxyHost: localIP,
                 proxyPort: result.port,
