@@ -295,6 +295,7 @@ Proxy-safe wrappers around a managed `chrome-devtools-mcp` sidecar, bound to a s
 | `interceptor_chrome_devtools_detach` | Close one bound DevTools sidecar session |
 
 Note: image payloads from DevTools responses are redacted from MCP output to avoid pushing large base64 blobs into context.
+If `file_path` is provided for screenshot and sidecar returns the image inline, proxy-mcp writes it to disk in the wrapper.
 
 ### Sessions (10)
 

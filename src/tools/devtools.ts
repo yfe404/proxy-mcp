@@ -8,6 +8,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -70,6 +71,99 @@ function sanitizeDevToolsPayload(payload: unknown): unknown {
     out[k] = sanitizeDevToolsPayload(v);
   }
   return out;
+}
+
+interface InlineImagePayload {
+  data: string;
+  mimeType?: string;
+}
+
+function findInlineImagePayload(payload: unknown): InlineImagePayload | null {
+  const stack: unknown[] = [payload];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === null || current === undefined) continue;
+
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    if (typeof current !== "object") continue;
+
+    const obj = current as Record<string, unknown>;
+    if (obj.type === "image" && typeof obj.data === "string" && obj.data.length > 0) {
+      return {
+        data: obj.data,
+        ...(typeof obj.mimeType === "string" ? { mimeType: obj.mimeType } : {}),
+      };
+    }
+    for (const value of Object.values(obj)) {
+      stack.push(value);
+    }
+  }
+  return null;
+}
+
+async function persistScreenshotIfRequested(
+  devtoolsResult: unknown,
+  filePath?: string,
+): Promise<Record<string, unknown>> {
+  if (!filePath) return {};
+
+  try {
+    if (existsSync(filePath)) {
+      return {
+        screenshot: {
+          requestedFilePath: filePath,
+          saved: true,
+          savedBy: "sidecar",
+        },
+      };
+    }
+
+    const inline = findInlineImagePayload(devtoolsResult);
+    if (!inline) {
+      return {
+        screenshot: {
+          requestedFilePath: filePath,
+          saved: false,
+          warning: "No inline image payload was returned by DevTools sidecar.",
+        },
+      };
+    }
+
+    const bytes = Buffer.from(inline.data, "base64");
+    if (bytes.length === 0 && inline.data.length > 0) {
+      return {
+        screenshot: {
+          requestedFilePath: filePath,
+          saved: false,
+          error: "Inline image payload could not be decoded from base64.",
+        },
+      };
+    }
+
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, bytes);
+
+    return {
+      screenshot: {
+        requestedFilePath: filePath,
+        saved: true,
+        savedBy: "proxy-wrapper",
+        bytesWritten: bytes.length,
+        ...(inline.mimeType ? { mimeType: inline.mimeType } : {}),
+      },
+    };
+  } catch (e) {
+    return {
+      screenshot: {
+        requestedFilePath: filePath,
+        saved: false,
+        error: errorToString(e),
+      },
+    };
+  }
 }
 
 function findProjectRoot(): string {
@@ -522,6 +616,7 @@ export function registerDevToolsTools(server: McpServer): void {
         if (quality !== undefined) args.quality = quality;
 
         const devtoolsResult = await devToolsBridge.callAction(devtools_session_id, "screenshot", args);
+        const screenshot = await persistScreenshotIfRequested(devtoolsResult, file_path);
         return {
           content: [{
             type: "text",
@@ -530,6 +625,7 @@ export function registerDevToolsTools(server: McpServer): void {
               devtools_session_id,
               target_id: targetId,
               devtoolsResult: sanitizeDevToolsPayload(devtoolsResult),
+              ...screenshot,
             }),
           }],
         };
