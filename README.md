@@ -2,7 +2,7 @@
 
 proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. It also ships "interceptors" to route Chrome, CLI tools, Docker containers, and Android devices/apps through the proxy.
 
-67 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
+73 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
 
 ### Boundaries
 
@@ -18,7 +18,7 @@ Use CDP/Playwright for browser internals (DOM, JS execution, localStorage, cooki
 | Capability | CDP / Playwright | proxy-mcp |
 |---|---|---|
 | See/modify DOM, run JS in page | Yes | No |
-| Read cookies, localStorage, sessionStorage | Yes (browser cookie jar) | No (but sees Cookie/Set-Cookie headers on the wire) |
+| Read cookies, localStorage, sessionStorage | Yes (browser internals) | Yes for proxy-launched Chrome via DevTools Bridge list/get tools; for any client, sees Cookie/Set-Cookie headers on the wire |
 | Capture HTTP request/response bodies | Yes for browser requests (protocol/size/streaming caveats) | Body previews only (4 KB cap, 1000-entry ring buffer) |
 | Modify requests in-flight (headers, body, mock, drop) | Via route/intercept handlers | Yes (declarative rules, hot-reload) |
 | Upstream proxy chaining (geo, auth) | Single browser via `--proxy-server` | Global + per-host upstreams across all clients (SOCKS4/5, HTTP, HTTPS, PAC) |
@@ -78,6 +78,39 @@ If launching Chrome manually, pass proxy flag yourself:
 
 ```bash
 google-chrome --proxy-server="http://127.0.0.1:<port>"
+```
+
+### 4) CLI/process setup (manual)
+
+Route any process through proxy-mcp by setting proxy env vars:
+
+```bash
+export HTTP_PROXY="http://127.0.0.1:<port>"
+export HTTPS_PROXY="http://127.0.0.1:<port>"
+```
+
+If the client verifies TLS, trust the proxy-mcp CA certificate (see `proxy_get_ca_cert`) or use the Terminal interceptor (`interceptor_spawn`) which sets proxy env vars plus common CA env vars (curl, Node, Python requests, Git, npm/yarn, etc.).
+
+### 5) Upstream proxy chaining (geo/auth)
+
+If you need proxy-mcp to egress through another upstream proxy (for geolocation, auth, or IP reputation), set a global upstream:
+
+```bash
+proxy_set_upstream --proxy_url "socks5://user:pass@upstream.example:1080"
+```
+
+Supported upstream URL schemes: `socks4://`, `socks5://`, `http://`, `https://`, `pac+http://`.
+
+Per-host override:
+
+```bash
+proxy_set_host_upstream --hostname "api.example.com" --proxy_url "http://user:pass@upstream.example:8080"
+```
+
+Disable upstream chaining:
+
+```bash
+proxy_clear_upstream
 ```
 
 For HTTPS MITM, the proxy CA must be trusted in the target environment (`proxy_get_ca_cert`).
@@ -335,7 +368,7 @@ Sets 18+ env vars covering curl, Node.js, Python requests, Deno, Git, npm/yarn.
 
 Two modes: `exec` (live injection, existing processes need restart) and `restart` (stop + restart container). Uses `host.docker.internal` for proxy URL.
 
-### DevTools Bridge (8)
+### DevTools Bridge (14)
 
 Proxy-safe wrappers around a managed `chrome-devtools-mcp` sidecar, bound to a specific `interceptor_chrome_launch` target.
 
@@ -348,6 +381,12 @@ Proxy-safe wrappers around a managed `chrome-devtools-mcp` sidecar, bound to a s
 | `interceptor_chrome_devtools_list_network` | List network requests from bound DevTools session |
 | `interceptor_chrome_devtools_list_console` | List console messages from bound DevTools session |
 | `interceptor_chrome_devtools_screenshot` | Capture screenshot from bound DevTools session |
+| `interceptor_chrome_devtools_list_cookies` | Token-efficient cookie listing with filters, pagination, and truncated value previews |
+| `interceptor_chrome_devtools_get_cookie` | Get one cookie by `cookie_id` (value is capped to keep output bounded) |
+| `interceptor_chrome_devtools_list_storage_keys` | Token-efficient localStorage/sessionStorage key listing with pagination and value previews |
+| `interceptor_chrome_devtools_get_storage_value` | Get one storage value by `item_id` |
+| `interceptor_chrome_devtools_list_network_fields` | Token-efficient header field listing from proxy-captured traffic since session creation |
+| `interceptor_chrome_devtools_get_network_field` | Get one full header field value by `field_id` |
 | `interceptor_chrome_devtools_detach` | Close one bound DevTools sidecar session |
 
 Note: image payloads from DevTools responses are redacted from MCP output to avoid pushing large base64 blobs into context.

@@ -54,7 +54,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 67 tools", async () => {
+  it("lists all 73 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -96,6 +96,12 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("interceptor_chrome_devtools_list_network"));
     assert.ok(names.includes("interceptor_chrome_devtools_list_console"));
     assert.ok(names.includes("interceptor_chrome_devtools_screenshot"));
+    assert.ok(names.includes("interceptor_chrome_devtools_list_cookies"));
+    assert.ok(names.includes("interceptor_chrome_devtools_get_cookie"));
+    assert.ok(names.includes("interceptor_chrome_devtools_list_storage_keys"));
+    assert.ok(names.includes("interceptor_chrome_devtools_get_storage_value"));
+    assert.ok(names.includes("interceptor_chrome_devtools_list_network_fields"));
+    assert.ok(names.includes("interceptor_chrome_devtools_get_network_field"));
     assert.ok(names.includes("interceptor_chrome_devtools_detach"));
     // Session persistence tools
     assert.ok(names.includes("proxy_session_start"));
@@ -111,7 +117,7 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_import_har"));
     assert.ok(names.includes("proxy_replay_session"));
     assert.ok(names.includes("proxy_get_session_handshakes"));
-    assert.equal(names.length, 67);
+    assert.equal(names.length, 73);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {

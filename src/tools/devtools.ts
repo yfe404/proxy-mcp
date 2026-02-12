@@ -12,8 +12,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { interceptorManager } from "../interceptors/manager.js";
-import { getCdpBaseUrl, getCdpTargets } from "../cdp-utils.js";
+import { getCdpBaseUrl, getCdpTargets, sendCdpCommand } from "../cdp-utils.js";
 import { proxyManager } from "../state.js";
 import { truncateResult } from "../utils.js";
 import { devToolsBridge, getLocalSidecarStatus, resetSidecarResolutionCache } from "../devtools/bridge.js";
@@ -71,6 +72,145 @@ function sanitizeDevToolsPayload(payload: unknown): unknown {
     out[k] = sanitizeDevToolsPayload(v);
   }
   return out;
+}
+
+const DEFAULT_VALUE_MAX_CHARS = 256;
+const DEFAULT_LIST_LIMIT = 50;
+const MAX_LIST_LIMIT = 500;
+const HARD_VALUE_CAP_CHARS = 20000;
+
+function normalizeLimit(limit: number | undefined): number {
+  const n = limit ?? DEFAULT_LIST_LIMIT;
+  if (!Number.isFinite(n)) return DEFAULT_LIST_LIMIT;
+  return Math.max(1, Math.min(MAX_LIST_LIMIT, Math.trunc(n)));
+}
+
+function normalizeOffset(offset: number | undefined): number {
+  const n = offset ?? 0;
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.trunc(n));
+}
+
+function toBase64UrlUtf8(s: string): string {
+  return Buffer.from(s, "utf8")
+    .toString("base64")
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/g, "");
+}
+
+function fromBase64UrlUtf8(s: string): string {
+  let b64 = s.replaceAll("-", "+").replaceAll("_", "/");
+  while (b64.length % 4 !== 0) b64 += "=";
+  return Buffer.from(b64, "base64").toString("utf8");
+}
+
+function capValue(value: string, maxChars: number): { value: string; valueLength: number; truncated: boolean; maxChars: number } {
+  const valueLength = value.length;
+  const effectiveMax = Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(maxChars)));
+  if (effectiveMax === 0) {
+    return { value, valueLength, truncated: false, maxChars: 0 };
+  }
+  if (valueLength <= effectiveMax) {
+    return { value, valueLength, truncated: false, maxChars: effectiveMax };
+  }
+  return { value: value.slice(0, effectiveMax) + "...", valueLength, truncated: true, maxChars: effectiveMax };
+}
+
+function cookieStableId(cookie: Record<string, unknown>): string {
+  const parts = [
+    typeof cookie.name === "string" ? cookie.name : "",
+    typeof cookie.domain === "string" ? cookie.domain : "",
+    typeof cookie.path === "string" ? cookie.path : "",
+    String(!!cookie.secure),
+    String(!!cookie.httpOnly),
+    typeof cookie.sameSite === "string" ? cookie.sameSite : "",
+    typeof cookie.partitionKey === "string" ? cookie.partitionKey : "",
+  ];
+  const hash = createHash("sha1").update(parts.join("|"), "utf8").digest("hex");
+  return `ck_${hash}`;
+}
+
+function targetUrlIsUserPage(url: unknown): boolean {
+  if (typeof url !== "string") return false;
+  const tUrl = url.toLowerCase();
+  return tUrl.length > 0 && !tUrl.startsWith("devtools://") && !tUrl.startsWith("chrome://");
+}
+
+function pickCdpPageTarget(targets: Array<Record<string, unknown>>): { url: string; wsUrl: string } {
+  const pages = targets.filter((t) => t.type === "page");
+  if (pages.length === 0) {
+    throw new Error("No page targets available for this Chrome instance.");
+  }
+  const selected = pages.find((t) => targetUrlIsUserPage(t.url)) ?? pages[0];
+  const url = typeof selected.url === "string" ? selected.url : "";
+  const wsUrl = typeof selected.webSocketDebuggerUrl === "string" ? selected.webSocketDebuggerUrl : "";
+  if (!wsUrl) {
+    throw new Error("Selected page target has no webSocketDebuggerUrl.");
+  }
+  return { url, wsUrl };
+}
+
+function getOriginFromUrl(url: string): string | null {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
+async function getCdpPageEndpoint(targetId: string): Promise<{ pageUrl: string; wsUrl: string; port: number }> {
+  const port = await getChromeTargetPort(targetId);
+  const targets = await getCdpTargets(port, { timeoutMs: 2000 });
+  const { url: pageUrl, wsUrl } = pickCdpPageTarget(targets);
+  return { pageUrl, wsUrl, port };
+}
+
+async function cdpGetCookies(wsUrl: string, pageUrl?: string): Promise<Array<Record<string, unknown>>> {
+  const attempts: Array<{ method: string; params?: Record<string, unknown> }> = [
+    { method: "Storage.getCookies" },
+    { method: "Network.getAllCookies" },
+  ];
+  if (pageUrl) {
+    attempts.push({ method: "Network.getCookies", params: { urls: [pageUrl] } });
+  }
+
+  let lastErr: unknown = null;
+  for (const attempt of attempts) {
+    try {
+      const result = await sendCdpCommand(wsUrl, attempt.method, attempt.params);
+      const cookies = (result as Record<string, unknown>).cookies;
+      if (Array.isArray(cookies)) {
+        return cookies.filter((c): c is Record<string, unknown> => !!c && typeof c === "object");
+      }
+      lastErr = new Error(`CDP ${attempt.method} returned no cookies array.`);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  throw new Error(`Unable to fetch cookies via CDP.${lastErr ? ` Last error: ${errorToString(lastErr)}` : ""}`);
+}
+
+async function cdpEvaluateValue<T = unknown>(
+  wsUrl: string,
+  expression: string,
+): Promise<T> {
+  const result = await sendCdpCommand(wsUrl, "Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  const err = (result as Record<string, unknown>).exceptionDetails;
+  if (err) {
+    throw new Error(`Runtime.evaluate failed: ${JSON.stringify(err)}`);
+  }
+
+  const remote = (result as Record<string, unknown>).result as Record<string, unknown> | undefined;
+  return (remote?.value as T);
 }
 
 interface InlineImagePayload {
@@ -351,7 +491,8 @@ export function registerDevToolsTools(server: McpServer): void {
                 ? {
                     warning:
                       "chrome-devtools-mcp binary was not found. Session is running in native-fallback mode: " +
-                      "navigation works, but snapshot/network/console/screenshot require installing chrome-devtools-mcp.",
+                      "navigation works; cookie/storage list/get tools still work via direct CDP; " +
+                      "snapshot/network/console/screenshot require installing chrome-devtools-mcp.",
                   }
                 : {}),
               cdp: {
@@ -626,6 +767,581 @@ export function registerDevToolsTools(server: McpServer): void {
               target_id: targetId,
               devtoolsResult: sanitizeDevToolsPayload(devtoolsResult),
               ...screenshot,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "interceptor_chrome_devtools_list_cookies",
+    "List browser cookies for the bound Chrome session with pagination and truncated values by default.",
+    {
+      devtools_session_id: z.string().describe("Session ID from interceptor_chrome_devtools_attach"),
+      url_filter: z.string().optional().describe("Filter cookies by domain/path substring"),
+      domain_filter: z.string().optional().describe("Filter cookies by domain substring"),
+      name_filter: z.string().optional().describe("Filter cookies by name substring"),
+      offset: z.number().optional().default(0).describe("Offset into results (default: 0)"),
+      limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Max cookies to return (default: 50, max: 500)"),
+      value_max_chars: z.number().optional().default(DEFAULT_VALUE_MAX_CHARS)
+        .describe("Max characters for cookie value previews (default: 256)"),
+      sort: z.enum(["name", "domain", "expires"]).optional().default("name").describe("Sort order (default: name)"),
+    },
+    async ({ devtools_session_id, url_filter, domain_filter, name_filter, offset, limit, value_max_chars, sort }) => {
+      try {
+        const session = devToolsBridge.getSession(devtools_session_id);
+        if (!session) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `DevTools session '${devtools_session_id}' not found.` }) }] };
+        }
+
+        const { targetId } = await ensureSessionTargetIsAlive(devtools_session_id);
+        const { pageUrl, wsUrl } = await getCdpPageEndpoint(targetId);
+        const cookies = await cdpGetCookies(wsUrl, pageUrl);
+
+        const urlNeedle = url_filter?.toLowerCase();
+        const domainNeedle = domain_filter?.toLowerCase();
+        const nameNeedle = name_filter?.toLowerCase();
+
+        const filtered = cookies.filter((c) => {
+          const name = typeof c.name === "string" ? c.name : "";
+          const domain = typeof c.domain === "string" ? c.domain : "";
+          const path = typeof c.path === "string" ? c.path : "";
+          if (urlNeedle && !`${domain}${path}`.toLowerCase().includes(urlNeedle)) return false;
+          if (domainNeedle && !domain.toLowerCase().includes(domainNeedle)) return false;
+          if (nameNeedle && !name.toLowerCase().includes(nameNeedle)) return false;
+          return true;
+        });
+
+        const sorted = filtered.sort((a, b) => {
+          const aName = typeof a.name === "string" ? a.name : "";
+          const bName = typeof b.name === "string" ? b.name : "";
+          const aDomain = typeof a.domain === "string" ? a.domain : "";
+          const bDomain = typeof b.domain === "string" ? b.domain : "";
+          const aExpires = typeof a.expires === "number" ? a.expires : 0;
+          const bExpires = typeof b.expires === "number" ? b.expires : 0;
+
+          switch (sort) {
+            case "domain": return aDomain.localeCompare(bDomain) || aName.localeCompare(bName);
+            case "expires": return aExpires - bExpires || aDomain.localeCompare(bDomain) || aName.localeCompare(bName);
+            case "name":
+            default: return aName.localeCompare(bName) || aDomain.localeCompare(bDomain);
+          }
+        });
+
+        const total = sorted.length;
+        const o = normalizeOffset(offset);
+        const l = normalizeLimit(limit);
+        const page = sorted.slice(o, o + l);
+
+        const valueCap = Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? DEFAULT_VALUE_MAX_CHARS)));
+
+        const summaries = page.map((c) => {
+          const name = typeof c.name === "string" ? c.name : "";
+          const domain = typeof c.domain === "string" ? c.domain : "";
+          const path = typeof c.path === "string" ? c.path : "";
+          const value = typeof c.value === "string" ? c.value : "";
+          const capped = capValue(value, valueCap);
+          return {
+            cookie_id: cookieStableId(c),
+            name,
+            domain,
+            path,
+            expires: typeof c.expires === "number" ? c.expires : null,
+            httpOnly: typeof c.httpOnly === "boolean" ? c.httpOnly : null,
+            secure: typeof c.secure === "boolean" ? c.secure : null,
+            sameSite: typeof c.sameSite === "string" ? c.sameSite : null,
+            value_preview: capped.value,
+            value_length: capped.valueLength,
+            value_truncated: capped.truncated,
+          };
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: truncateResult({
+              status: "success",
+              devtools_session_id,
+              target_id: targetId,
+              total,
+              offset: o,
+              limit: l,
+              showing: summaries.length,
+              cookies: summaries,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "interceptor_chrome_devtools_get_cookie",
+    "Get one cookie by cookie_id with full value (subject to a hard cap to keep output bounded).",
+    {
+      devtools_session_id: z.string().describe("Session ID from interceptor_chrome_devtools_attach"),
+      cookie_id: z.string().describe("cookie_id from interceptor_chrome_devtools_list_cookies"),
+      value_max_chars: z.number().optional().default(HARD_VALUE_CAP_CHARS)
+        .describe(`Max characters for cookie value (default: ${HARD_VALUE_CAP_CHARS})`),
+    },
+    async ({ devtools_session_id, cookie_id, value_max_chars }) => {
+      try {
+        const session = devToolsBridge.getSession(devtools_session_id);
+        if (!session) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `DevTools session '${devtools_session_id}' not found.` }) }] };
+        }
+
+        const { targetId } = await ensureSessionTargetIsAlive(devtools_session_id);
+        const { pageUrl, wsUrl } = await getCdpPageEndpoint(targetId);
+        const cookies = await cdpGetCookies(wsUrl, pageUrl);
+
+        const found = cookies.find((c) => cookieStableId(c) === cookie_id) ?? null;
+        if (!found) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ status: "error", error: `Cookie '${cookie_id}' not found. Re-run list tool.` }),
+            }],
+          };
+        }
+
+        const value = typeof found.value === "string" ? found.value : "";
+        const capped = capValue(value, Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? HARD_VALUE_CAP_CHARS))));
+
+        return {
+          content: [{
+            type: "text",
+            text: truncateResult({
+              status: "success",
+              devtools_session_id,
+              target_id: targetId,
+              cookie_id,
+              cookie: {
+                ...found,
+                value: capped.value,
+              },
+              value_length: capped.valueLength,
+              value_truncated: capped.truncated,
+              value_max_chars: capped.maxChars,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "interceptor_chrome_devtools_list_storage_keys",
+    "List localStorage/sessionStorage keys for the current origin with pagination and truncated value previews.",
+    {
+      devtools_session_id: z.string().describe("Session ID from interceptor_chrome_devtools_attach"),
+      storage_type: z.enum(["local", "session"]).describe("Storage type"),
+      origin: z.string().optional().describe("Optional origin override (must match current page origin)"),
+      key_filter: z.string().optional().describe("Filter by key substring"),
+      offset: z.number().optional().default(0).describe("Offset into results (default: 0)"),
+      limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Max items to return (default: 50, max: 500)"),
+      value_max_chars: z.number().optional().default(DEFAULT_VALUE_MAX_CHARS)
+        .describe("Max characters for storage value previews (default: 256)"),
+    },
+    async ({ devtools_session_id, storage_type, origin, key_filter, offset, limit, value_max_chars }) => {
+      try {
+        const session = devToolsBridge.getSession(devtools_session_id);
+        if (!session) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `DevTools session '${devtools_session_id}' not found.` }) }] };
+        }
+
+        const { targetId } = await ensureSessionTargetIsAlive(devtools_session_id);
+        const { pageUrl, wsUrl } = await getCdpPageEndpoint(targetId);
+
+        const currentOrigin = getOriginFromUrl(pageUrl);
+        if (!currentOrigin) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `No http(s) origin available for current page URL: '${pageUrl}'` }) }] };
+        }
+        if (origin && origin !== currentOrigin) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ status: "error", error: `origin '${origin}' does not match current origin '${currentOrigin}'. Navigate first.` }),
+            }],
+          };
+        }
+
+        const previewLen = Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? DEFAULT_VALUE_MAX_CHARS)));
+        const keyNeedle = (key_filter ?? "").toLowerCase();
+        const stType = storage_type;
+
+        const expr = `(() => {
+  try {
+    const storageType = ${JSON.stringify(stType)};
+    const keyFilter = ${JSON.stringify(keyNeedle)};
+    const maxChars = ${previewLen};
+    const storage = storageType === "local" ? localStorage : sessionStorage;
+    const out = [];
+    for (let i = 0; i < storage.length; i++) {
+      const k = storage.key(i);
+      if (typeof k !== "string") continue;
+      if (keyFilter && !k.toLowerCase().includes(keyFilter)) continue;
+      const raw = storage.getItem(k);
+      const v = typeof raw === "string" ? raw : "";
+      out.push({ key: k, valuePreview: maxChars > 0 ? v.slice(0, maxChars) : "", valueLength: v.length });
+    }
+    out.sort((a, b) => a.key.localeCompare(b.key));
+    return out;
+  } catch (e) {
+    return { error: String(e && e.message ? e.message : e) };
+  }
+})()`;
+
+        const result = await cdpEvaluateValue(wsUrl, expr) as unknown;
+        if (result && typeof result === "object" && !Array.isArray(result) && "error" in (result as Record<string, unknown>)) {
+          const err = (result as Record<string, unknown>).error;
+          throw new Error(`Storage evaluation error: ${typeof err === "string" ? err : JSON.stringify(err)}`);
+        }
+        if (!Array.isArray(result)) {
+          throw new Error("Unexpected storage evaluation result.");
+        }
+
+        const items = result
+          .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+          .map((x) => ({
+            key: typeof x.key === "string" ? x.key : "",
+            valuePreview: typeof x.valuePreview === "string" ? x.valuePreview : "",
+            valueLength: typeof x.valueLength === "number" ? x.valueLength : 0,
+          }))
+          .filter((x) => x.key.length > 0);
+
+        const total = items.length;
+        const o = normalizeOffset(offset);
+        const l = normalizeLimit(limit);
+        const page = items.slice(o, o + l);
+
+        const summaries = page.map((x) => ({
+          item_id: `st.${stType}.${toBase64UrlUtf8(currentOrigin)}.${toBase64UrlUtf8(x.key)}`,
+          key: x.key,
+          value_preview: x.valuePreview,
+          value_length: x.valueLength,
+          value_truncated: previewLen > 0 ? x.valueLength > previewLen : (x.valueLength > 0),
+        }));
+
+        return {
+          content: [{
+            type: "text",
+            text: truncateResult({
+              status: "success",
+              devtools_session_id,
+              target_id: targetId,
+              origin: currentOrigin,
+              storage_type: stType,
+              total,
+              offset: o,
+              limit: l,
+              showing: summaries.length,
+              items: summaries,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "interceptor_chrome_devtools_get_storage_value",
+    "Get one localStorage/sessionStorage value by item_id.",
+    {
+      devtools_session_id: z.string().describe("Session ID from interceptor_chrome_devtools_attach"),
+      storage_type: z.enum(["local", "session"]).describe("Storage type"),
+      item_id: z.string().describe("item_id from interceptor_chrome_devtools_list_storage_keys"),
+      origin: z.string().optional().describe("Optional origin override (must match current page origin)"),
+      value_max_chars: z.number().optional().default(HARD_VALUE_CAP_CHARS)
+        .describe(`Max characters for returned value (default: ${HARD_VALUE_CAP_CHARS})`),
+    },
+    async ({ devtools_session_id, storage_type, item_id, origin, value_max_chars }) => {
+      try {
+        const session = devToolsBridge.getSession(devtools_session_id);
+        if (!session) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `DevTools session '${devtools_session_id}' not found.` }) }] };
+        }
+
+        const parts = item_id.split(".");
+        if (parts.length !== 4 || parts[0] !== "st") {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `Invalid item_id '${item_id}'` }) }] };
+        }
+        const itemType = parts[1];
+        const itemOrigin = fromBase64UrlUtf8(parts[2]);
+        const itemKey = fromBase64UrlUtf8(parts[3]);
+        if (itemType !== storage_type) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `item_id storage_type '${itemType}' does not match requested '${storage_type}'` }) }] };
+        }
+
+        const { targetId } = await ensureSessionTargetIsAlive(devtools_session_id);
+        const { pageUrl, wsUrl } = await getCdpPageEndpoint(targetId);
+
+        const currentOrigin = getOriginFromUrl(pageUrl);
+        if (!currentOrigin) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `No http(s) origin available for current page URL: '${pageUrl}'` }) }] };
+        }
+        if (origin && origin !== currentOrigin) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ status: "error", error: `origin '${origin}' does not match current origin '${currentOrigin}'. Navigate first.` }),
+            }],
+          };
+        }
+        if (itemOrigin !== currentOrigin) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ status: "error", error: `item_id origin '${itemOrigin}' does not match current origin '${currentOrigin}'. Navigate first.` }),
+            }],
+          };
+        }
+
+        const maxChars = Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? HARD_VALUE_CAP_CHARS)));
+        const stType = storage_type;
+
+        const expr = `(() => {
+  try {
+    const storageType = ${JSON.stringify(stType)};
+    const key = ${JSON.stringify(itemKey)};
+    const maxChars = ${maxChars};
+    const storage = storageType === "local" ? localStorage : sessionStorage;
+    const raw = storage.getItem(key);
+    const v = typeof raw === "string" ? raw : "";
+    const valueLength = v.length;
+    const truncated = maxChars > 0 && valueLength > maxChars;
+    const value = maxChars > 0 ? (truncated ? v.slice(0, maxChars) : v) : v;
+    return { key, value, valueLength, truncated };
+  } catch (e) {
+    return { error: String(e && e.message ? e.message : e) };
+  }
+})()`;
+
+        const result = await cdpEvaluateValue(wsUrl, expr) as unknown;
+        if (!result || typeof result !== "object") {
+          throw new Error("Unexpected storage evaluation result.");
+        }
+        const obj = result as Record<string, unknown>;
+        if (obj.error) {
+          throw new Error(`Storage evaluation error: ${typeof obj.error === "string" ? obj.error : JSON.stringify(obj.error)}`);
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: truncateResult({
+              status: "success",
+              devtools_session_id,
+              target_id: targetId,
+              origin: currentOrigin,
+              storage_type: stType,
+              item_id,
+              key: obj.key ?? itemKey,
+              value: typeof obj.value === "string" ? obj.value : "",
+              value_length: typeof obj.valueLength === "number" ? obj.valueLength : null,
+              value_truncated: typeof obj.truncated === "boolean" ? obj.truncated : null,
+              value_max_chars: maxChars,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "interceptor_chrome_devtools_list_network_fields",
+    "List request/response header fields from proxy-captured traffic since the DevTools session was created, with pagination and truncation.",
+    {
+      devtools_session_id: z.string().describe("Session ID from interceptor_chrome_devtools_attach"),
+      direction: z.enum(["request", "response", "both"]).optional().default("both").describe("Header direction (default: both)"),
+      header_name_filter: z.string().optional().describe("Filter by header name substring"),
+      method_filter: z.string().optional().describe("Filter by HTTP method"),
+      url_filter: z.string().optional().describe("Filter by URL substring"),
+      status_filter: z.number().optional().describe("Filter by response status code"),
+      hostname_filter: z.string().optional().describe("Filter by hostname substring"),
+      offset: z.number().optional().default(0).describe("Offset into results (default: 0)"),
+      limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Max fields to return (default: 50, max: 500)"),
+      value_max_chars: z.number().optional().default(DEFAULT_VALUE_MAX_CHARS)
+        .describe("Max characters for header value previews (default: 256)"),
+    },
+    async ({ devtools_session_id, direction, header_name_filter, method_filter, url_filter, status_filter, hostname_filter, offset, limit, value_max_chars }) => {
+      try {
+        const session = devToolsBridge.getSession(devtools_session_id);
+        if (!session) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `DevTools session '${devtools_session_id}' not found.` }) }] };
+        }
+        const { targetId } = await ensureSessionTargetIsAlive(devtools_session_id);
+
+        const since = session.createdAt;
+        let traffic = proxyManager.getTraffic().filter((t) => t.timestamp >= since);
+
+        if (method_filter) {
+          const m = method_filter.toUpperCase();
+          traffic = traffic.filter((t) => t.request.method === m);
+        }
+        if (url_filter) {
+          const u = url_filter.toLowerCase();
+          traffic = traffic.filter((t) => t.request.url.toLowerCase().includes(u));
+        }
+        if (status_filter !== undefined) {
+          traffic = traffic.filter((t) => t.response?.statusCode === status_filter);
+        }
+        if (hostname_filter) {
+          const h = hostname_filter.toLowerCase();
+          traffic = traffic.filter((t) => t.request.hostname.toLowerCase().includes(h));
+        }
+
+        const nameNeedle = header_name_filter?.toLowerCase();
+        const valueCap = Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? DEFAULT_VALUE_MAX_CHARS)));
+
+        const rows: Array<Record<string, unknown>> = [];
+        const wantReq = direction === "request" || direction === "both";
+        const wantRes = direction === "response" || direction === "both";
+
+        for (const ex of traffic) {
+          if (wantReq) {
+            for (const [k, v] of Object.entries(ex.request.headers)) {
+              if (nameNeedle && !k.toLowerCase().includes(nameNeedle)) continue;
+              const capped = capValue(v, valueCap);
+              rows.push({
+                field_id: `nf.${ex.id}.request.${toBase64UrlUtf8(k.toLowerCase())}`,
+                exchange_id: ex.id,
+                direction: "request",
+                header_name: k,
+                value_preview: capped.value,
+                value_length: capped.valueLength,
+                value_truncated: capped.truncated,
+                method: ex.request.method,
+                url: ex.request.url,
+                hostname: ex.request.hostname,
+                status: ex.response?.statusCode ?? null,
+                timestamp: ex.timestamp,
+              });
+            }
+          }
+          if (wantRes && ex.response) {
+            for (const [k, v] of Object.entries(ex.response.headers)) {
+              if (nameNeedle && !k.toLowerCase().includes(nameNeedle)) continue;
+              const capped = capValue(v, valueCap);
+              rows.push({
+                field_id: `nf.${ex.id}.response.${toBase64UrlUtf8(k.toLowerCase())}`,
+                exchange_id: ex.id,
+                direction: "response",
+                header_name: k,
+                value_preview: capped.value,
+                value_length: capped.valueLength,
+                value_truncated: capped.truncated,
+                method: ex.request.method,
+                url: ex.request.url,
+                hostname: ex.request.hostname,
+                status: ex.response.statusCode,
+                timestamp: ex.timestamp,
+              });
+            }
+          }
+        }
+
+        const total = rows.length;
+        const o = normalizeOffset(offset);
+        const l = normalizeLimit(limit);
+        const page = rows.slice(o, o + l);
+
+        return {
+          content: [{
+            type: "text",
+            text: truncateResult({
+              status: "success",
+              devtools_session_id,
+              target_id: targetId,
+              since_ts: since,
+              total,
+              offset: o,
+              limit: l,
+              showing: page.length,
+              fields: page,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "interceptor_chrome_devtools_get_network_field",
+    "Get one full header field value from proxy-captured traffic by field_id.",
+    {
+      devtools_session_id: z.string().describe("Session ID from interceptor_chrome_devtools_attach"),
+      field_id: z.string().describe("field_id from interceptor_chrome_devtools_list_network_fields"),
+      value_max_chars: z.number().optional().default(HARD_VALUE_CAP_CHARS)
+        .describe(`Max characters for returned value (default: ${HARD_VALUE_CAP_CHARS})`),
+    },
+    async ({ devtools_session_id, field_id, value_max_chars }) => {
+      try {
+        const session = devToolsBridge.getSession(devtools_session_id);
+        if (!session) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `DevTools session '${devtools_session_id}' not found.` }) }] };
+        }
+        const { targetId } = await ensureSessionTargetIsAlive(devtools_session_id);
+
+        const parts = field_id.split(".");
+        if (parts.length !== 4 || parts[0] !== "nf") {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `Invalid field_id '${field_id}'` }) }] };
+        }
+        const exchangeId = parts[1];
+        const dir = parts[2];
+        const headerName = fromBase64UrlUtf8(parts[3]);
+
+        const exchange = proxyManager.getExchange(exchangeId);
+        if (!exchange) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `Exchange '${exchangeId}' not found in capture buffer.` }) }] };
+        }
+        if (exchange.timestamp < session.createdAt) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "field_id refers to an exchange older than this DevTools session." }) }] };
+        }
+
+        let value: string | null = null;
+        if (dir === "request") {
+          value = exchange.request.headers[headerName.toLowerCase()] ?? null;
+        } else if (dir === "response") {
+          value = exchange.response?.headers?.[headerName.toLowerCase()] ?? null;
+        } else {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `Invalid field direction '${dir}'` }) }] };
+        }
+
+        if (value === null) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `Header '${headerName}' not found on ${dir}.` }) }] };
+        }
+
+        const capped = capValue(value, Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? HARD_VALUE_CAP_CHARS))));
+
+        return {
+          content: [{
+            type: "text",
+            text: truncateResult({
+              status: "success",
+              devtools_session_id,
+              target_id: targetId,
+              field_id,
+              exchange_id: exchangeId,
+              direction: dir,
+              header_name: headerName,
+              value: capped.value,
+              value_length: capped.valueLength,
+              value_truncated: capped.truncated,
+              value_max_chars: capped.maxChars,
             }),
           }],
         };

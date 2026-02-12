@@ -322,4 +322,4 @@ After cleanup, deliver this summary:
 - Request forwarding and connection dropping
 - Per-host proxy routing
 
-**Stats:** 67 tools, 8 resources, 4 resource templates, 5 interceptor types.
+**Stats:** 73 tools, 8 resources, 4 resource templates, 5 interceptor types.
