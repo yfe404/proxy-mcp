@@ -2,7 +2,7 @@
 
 proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. It also ships "interceptors" to route Chrome, CLI tools, Docker containers, and Android devices/apps through the proxy.
 
-64 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
+67 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
 
 ### Boundaries
 
@@ -154,6 +154,32 @@ Pull/install sidecar directly from MCP:
 ```bash
 interceptor_chrome_devtools_pull_sidecar --version "0.2.2"
 ```
+
+### 8) HAR import + replay
+
+Import HAR into a persisted session, then analyze with existing session query/findings tools:
+
+```bash
+proxy_import_har --har_file "/path/to/capture.har" --session_name "imported-run"
+proxy_list_sessions
+proxy_query_session --session_id SESSION_ID --hostname_contains "api.example.com"
+proxy_get_session_handshakes --session_id SESSION_ID
+```
+
+Replay defaults to dry-run (preview only). Execute requires explicit mode:
+
+```bash
+# Preview what would be replayed
+proxy_replay_session --session_id SESSION_ID --mode dry_run --limit 20
+
+# Execute replay against original hosts
+proxy_replay_session --session_id SESSION_ID --mode execute --limit 20
+
+# Optional: override target host/base URL while preserving path+query
+proxy_replay_session --session_id SESSION_ID --mode execute --target_base_url "http://127.0.0.1:8081"
+```
+
+Note: imported HAR entries typically have no JA3/JA4/JA3S handshake metadata. Capture live traffic or replay through active interception to analyze fresh handshake fingerprints.
 
 ## Setup
 
@@ -327,7 +353,7 @@ Proxy-safe wrappers around a managed `chrome-devtools-mcp` sidecar, bound to a s
 Note: image payloads from DevTools responses are redacted from MCP output to avoid pushing large base64 blobs into context.
 If `file_path` is provided for screenshot and sidecar returns the image inline, proxy-mcp writes it to disk in the wrapper.
 
-### Sessions (10)
+### Sessions (13)
 
 Persistent, queryable on-disk capture for long runs and post-crash analysis.
 
@@ -336,10 +362,13 @@ Persistent, queryable on-disk capture for long runs and post-crash analysis.
 | `proxy_session_start` | Start persistent session capture (preview or full-body mode) |
 | `proxy_session_stop` | Stop and finalize the active persistent session |
 | `proxy_session_status` | Runtime status for persistence (active session, bytes, disk cap errors) |
+| `proxy_import_har` | Import a HAR file from disk into a new persisted session |
 | `proxy_list_sessions` | List recorded sessions from disk |
 | `proxy_get_session` | Get manifest/details for one session |
 | `proxy_query_session` | Indexed query over recorded exchanges |
+| `proxy_get_session_handshakes` | Report JA3/JA4/JA3S handshake metadata availability for session entries |
 | `proxy_get_session_exchange` | Fetch one exchange from a session (with optional full bodies) |
+| `proxy_replay_session` | Dry-run or execute replay of selected session requests |
 | `proxy_export_har` | Export full session or filtered subset to HAR |
 | `proxy_delete_session` | Delete a stored session |
 | `proxy_session_recover` | Rebuild indexes from records after unclean shutdown |

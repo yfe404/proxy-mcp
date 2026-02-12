@@ -108,6 +108,35 @@ export function registerSessionTools(server: McpServer): void {
   );
 
   server.tool(
+    "proxy_import_har",
+    "Import a HAR file from disk into a new persisted session for querying, findings, and replay.",
+    {
+      har_file: z.string().describe("Path to HAR file on disk"),
+      session_name: z.string().optional().describe("Optional name for the imported session"),
+      storage_dir: z.string().optional().describe("Optional custom session storage directory"),
+      max_disk_mb: z.number().optional().default(1024).describe("Session disk cap in MB"),
+      strict: z.boolean().optional().default(false)
+        .describe("When true, abort on first invalid HAR entry; when false, skip invalid entries"),
+    },
+    async ({ har_file, session_name, storage_dir, max_disk_mb, strict }) => {
+      try {
+        const result = await proxyManager.importHarAsSession({
+          harFile: har_file,
+          sessionName: session_name,
+          storageDir: storage_dir,
+          maxDiskMb: max_disk_mb,
+          strict,
+        });
+        return {
+          content: [{ type: "text", text: truncateResult({ status: "success", ...result }) }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: toError(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
     "proxy_query_session",
     "Query indexed session exchanges with filters and pagination.",
     {
@@ -147,6 +176,35 @@ export function registerSessionTools(server: McpServer): void {
   );
 
   server.tool(
+    "proxy_get_session_handshakes",
+    "Summarize TLS handshake/fingerprint availability (JA3/JA4/JA3S) for session exchanges.",
+    {
+      session_id: z.string().describe("Session ID"),
+      limit: z.number().optional().default(200),
+      offset: z.number().optional().default(0),
+      sort: z.enum(["asc", "desc"]).optional().default("desc"),
+      hostname_contains: z.string().optional().describe("Filter by hostname substring"),
+      url_contains: z.string().optional().describe("Filter by URL substring"),
+    },
+    async ({ session_id, limit, offset, sort, hostname_contains, url_contains }) => {
+      try {
+        const report = await proxyManager.getSessionHandshakes(session_id, {
+          limit,
+          offset,
+          sort,
+          hostnameContains: hostname_contains,
+          urlContains: url_contains,
+        });
+        return {
+          content: [{ type: "text", text: truncateResult({ status: "success", ...report }) }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: toError(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
     "proxy_get_session_exchange",
     "Get one exchange from a recorded session by seq or exchange ID.",
     {
@@ -164,6 +222,71 @@ export function registerSessionTools(server: McpServer): void {
           seq,
           exchangeId: exchange_id,
           includeBody: include_body,
+        });
+        return {
+          content: [{ type: "text", text: truncateResult({ status: "success", ...result }) }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: toError(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "proxy_replay_session",
+    "Replay selected requests from a recorded/imported session. Default mode is dry_run for safety.",
+    {
+      session_id: z.string().describe("Session ID"),
+      mode: z.enum(["dry_run", "execute"]).optional().default("dry_run")
+        .describe("dry_run previews replay plan; execute sends the requests"),
+      limit: z.number().optional().default(100),
+      offset: z.number().optional().default(0),
+      sort: z.enum(["asc", "desc"]).optional().default("desc"),
+      method: z.string().optional().describe("HTTP method filter"),
+      hostname_contains: z.string().optional().describe("Filter by hostname substring"),
+      url_contains: z.string().optional().describe("Filter by URL substring"),
+      status_code: z.number().optional().describe("Response status code filter"),
+      from_ts: z.number().optional().describe("Unix ms lower-bound timestamp"),
+      to_ts: z.number().optional().describe("Unix ms upper-bound timestamp"),
+      text: z.string().optional().describe("Generic text filter"),
+      exchange_ids: z.array(z.string()).optional().describe("Explicit exchange IDs to replay (overrides query filters)"),
+      target_base_url: z.string().optional()
+        .describe("Optional base URL override (keeps original path+query)"),
+      timeout_ms: z.number().optional().default(15000).describe("Per-request timeout in milliseconds"),
+    },
+    async ({
+      session_id,
+      mode,
+      limit,
+      offset,
+      sort,
+      method,
+      hostname_contains,
+      url_contains,
+      status_code,
+      from_ts,
+      to_ts,
+      text,
+      exchange_ids,
+      target_base_url,
+      timeout_ms,
+    }) => {
+      try {
+        const result = await proxyManager.replaySession(session_id, {
+          mode,
+          limit,
+          offset,
+          sort,
+          method,
+          hostnameContains: hostname_contains,
+          urlContains: url_contains,
+          statusCode: status_code,
+          fromTs: from_ts,
+          toTs: to_ts,
+          text,
+          exchangeIds: exchange_ids,
+          targetBaseUrl: target_base_url,
+          timeoutMs: timeout_ms,
         });
         return {
           content: [{ type: "text", text: truncateResult({ status: "success", ...result }) }],

@@ -11,6 +11,7 @@
 
 import type * as mockttp from "mockttp";
 import type { CompletedRequest, CompletedResponse, ProxyConfig } from "mockttp";
+import { randomUUID } from "node:crypto";
 import { serializeHeaders, capString } from "./utils.js";
 import { enableServerTlsCapture, type ServerTlsCapture } from "./tls-utils.js";
 import { spoofedRequest, shutdownCycleTLS } from "./tls-spoof.js";
@@ -24,6 +25,8 @@ import {
   type SessionQuery,
   type SessionQueryResult,
   type SessionIndexEntry,
+  type HarImportOptions,
+  type HarImportSummary,
 } from "./session-store.js";
 
 let mockttpMod: typeof import("mockttp") | null = null;
@@ -125,6 +128,74 @@ export interface RuleTestResult {
   } | null;
 }
 
+export interface ReplaySessionOptions {
+  mode?: "dry_run" | "execute";
+  limit?: number;
+  offset?: number;
+  sort?: "asc" | "desc";
+  method?: string;
+  hostnameContains?: string;
+  urlContains?: string;
+  statusCode?: number;
+  fromTs?: number;
+  toTs?: number;
+  text?: string;
+  exchangeIds?: string[];
+  targetBaseUrl?: string;
+  timeoutMs?: number;
+}
+
+export interface ReplaySessionPlanItem {
+  seq: number;
+  exchangeId: string;
+  method: string;
+  originalUrl: string;
+  targetUrl: string;
+  hostname: string;
+  hasRequestBody: boolean;
+}
+
+export interface ReplaySessionExecutionItem extends ReplaySessionPlanItem {
+  status: "success" | "error";
+  durationMs?: number;
+  responseStatus?: number;
+  responseSize?: number;
+  replayExchangeId?: string;
+  error?: string;
+}
+
+export interface ReplaySessionResult {
+  mode: "dry_run" | "execute";
+  sessionId: string;
+  selectedCount: number;
+  executedCount: number;
+  successCount: number;
+  errorCount: number;
+  targetBaseUrl: string | null;
+  items: Array<ReplaySessionPlanItem | ReplaySessionExecutionItem>;
+}
+
+export interface SessionHandshakeItem {
+  seq: number;
+  exchangeId: string;
+  timestamp: number;
+  hostname: string;
+  url: string;
+  ja3: string | null;
+  ja4: string | null;
+  ja3s: string | null;
+  hasTls: boolean;
+}
+
+export interface SessionHandshakeReport {
+  sessionId: string;
+  total: number;
+  withTlsMetadata: number;
+  withoutTlsMetadata: number;
+  unavailableReason: string;
+  items: SessionHandshakeItem[];
+}
+
 export type RuleHandlerType = "passthrough" | "mock" | "forward" | "drop";
 
 export interface RuleHandler {
@@ -217,6 +288,34 @@ function nullsToUndefined(
 
 const MAX_TRAFFIC_ENTRIES = 1000;
 const MAX_BODY_PREVIEW = 4096;
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "proxy-connection",
+  "keep-alive",
+  "transfer-encoding",
+  "te",
+  "trailer",
+  "upgrade",
+  "content-length",
+  "host",
+]);
+
+function sanitizeReplayHeaders(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    const key = k.toLowerCase();
+    if (HOP_BY_HOP_HEADERS.has(key)) continue;
+    out[key] = v;
+  }
+  return out;
+}
+
+function rewriteReplayUrl(originalUrl: string, targetBaseUrl?: string): string {
+  if (!targetBaseUrl) return originalUrl;
+  const original = new URL(originalUrl);
+  const base = new URL(targetBaseUrl);
+  return new URL(`${original.pathname}${original.search}`, base).toString();
+}
 
 // ── ProxyManager ──
 
@@ -595,6 +694,274 @@ export class ProxyManager {
     hostErrorRates: Array<{ hostname: string; total: number; errors: number; errorRate: number }>;
   }> {
     return await this.sessionStore.getSessionFindings(sessionId);
+  }
+
+  async importHarAsSession(opts: HarImportOptions): Promise<{ session: SessionManifest; importSummary: HarImportSummary }> {
+    return await this.sessionStore.importHar(opts);
+  }
+
+  async getSessionHandshakes(
+    sessionId: string,
+    opts: {
+      limit?: number;
+      offset?: number;
+      hostnameContains?: string;
+      urlContains?: string;
+      sort?: "asc" | "desc";
+    } = {},
+  ): Promise<SessionHandshakeReport> {
+    const filterQuery = {
+      hostnameContains: opts.hostnameContains,
+      urlContains: opts.urlContains,
+      sort: opts.sort ?? "desc" as "asc" | "desc",
+    };
+
+    const all = await this.sessionStore.querySession(sessionId, {
+      ...filterQuery,
+      limit: 500000,
+      offset: 0,
+    });
+
+    const result = await this.sessionStore.querySession(sessionId, {
+      ...filterQuery,
+      limit: opts.limit ?? 200,
+      offset: opts.offset ?? 0,
+    });
+
+    const items: SessionHandshakeItem[] = result.items.map((entry) => {
+      const ja3 = entry.ja3 ?? null;
+      const ja4 = entry.ja4 ?? null;
+      const ja3s = entry.ja3s ?? null;
+      return {
+        seq: entry.seq,
+        exchangeId: entry.exchangeId,
+        timestamp: entry.timestamp,
+        hostname: entry.hostname,
+        url: entry.url,
+        ja3,
+        ja4,
+        ja3s,
+        hasTls: !!(ja3 || ja4 || ja3s),
+      };
+    });
+
+    const withTlsMetadata = all.items.filter((entry) => !!(entry.ja3 || entry.ja4 || entry.ja3s)).length;
+    return {
+      sessionId,
+      total: all.total,
+      withTlsMetadata,
+      withoutTlsMetadata: Math.max(0, all.total - withTlsMetadata),
+      unavailableReason:
+        "HAR imports usually do not include TLS handshake fingerprints. Replay through live proxy capture for JA3/JA4/JA3S.",
+      items,
+    };
+  }
+
+  async replaySession(sessionId: string, opts: ReplaySessionOptions = {}): Promise<ReplaySessionResult> {
+    const mode = opts.mode ?? "dry_run";
+    const timeoutMs = Math.max(1000, opts.timeoutMs ?? 15000);
+
+    const planned: ReplaySessionPlanItem[] = [];
+    const sourceItems: Array<{
+      seq: number;
+      exchangeId: string;
+      method: string;
+      originalUrl: string;
+      targetUrl: string;
+      hostname: string;
+      headers: Record<string, string>;
+      body: string;
+      bodyBuffer: Buffer;
+    }> = [];
+
+    if (opts.exchangeIds && opts.exchangeIds.length > 0) {
+      for (const exchangeId of opts.exchangeIds) {
+        const loaded = await this.sessionStore.getSessionExchange(sessionId, { exchangeId, includeBody: true });
+        const exchange = loaded.record?.exchange;
+        if (!exchange) {
+          throw new Error(`Exchange '${exchangeId}' not found in session '${sessionId}'.`);
+        }
+        const originalUrl = exchange.request.url;
+        const targetUrl = rewriteReplayUrl(originalUrl, opts.targetBaseUrl);
+        const headers = sanitizeReplayHeaders(exchange.request.headers);
+        const body = loaded.record?.requestBodyText ?? exchange.request.bodyPreview ?? "";
+        const bodyBuffer = Buffer.from(body, "utf8");
+        sourceItems.push({
+          seq: loaded.index.seq,
+          exchangeId: loaded.index.exchangeId,
+          method: exchange.request.method,
+          originalUrl,
+          targetUrl,
+          hostname: new URL(targetUrl).hostname,
+          headers,
+          body,
+          bodyBuffer,
+        });
+      }
+    } else {
+      const result = await this.sessionStore.querySession(sessionId, {
+        limit: opts.limit ?? 100,
+        offset: opts.offset ?? 0,
+        sort: opts.sort ?? "desc",
+        method: opts.method,
+        hostnameContains: opts.hostnameContains,
+        urlContains: opts.urlContains,
+        statusCode: opts.statusCode,
+        fromTs: opts.fromTs,
+        toTs: opts.toTs,
+        text: opts.text,
+      });
+
+      for (const entry of result.items) {
+        const loaded = await this.sessionStore.getSessionExchange(sessionId, { exchangeId: entry.exchangeId, includeBody: true });
+        const exchange = loaded.record?.exchange;
+        if (!exchange) continue;
+        const originalUrl = exchange.request.url;
+        const targetUrl = rewriteReplayUrl(originalUrl, opts.targetBaseUrl);
+        const headers = sanitizeReplayHeaders(exchange.request.headers);
+        const body = loaded.record?.requestBodyText ?? exchange.request.bodyPreview ?? "";
+        const bodyBuffer = Buffer.from(body, "utf8");
+        sourceItems.push({
+          seq: loaded.index.seq,
+          exchangeId: loaded.index.exchangeId,
+          method: exchange.request.method,
+          originalUrl,
+          targetUrl,
+          hostname: new URL(targetUrl).hostname,
+          headers,
+          body,
+          bodyBuffer,
+        });
+      }
+    }
+
+    for (const item of sourceItems) {
+      planned.push({
+        seq: item.seq,
+        exchangeId: item.exchangeId,
+        method: item.method,
+        originalUrl: item.originalUrl,
+        targetUrl: item.targetUrl,
+        hostname: item.hostname,
+        hasRequestBody: item.bodyBuffer.length > 0,
+      });
+    }
+
+    if (mode === "dry_run") {
+      return {
+        mode,
+        sessionId,
+        selectedCount: planned.length,
+        executedCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        targetBaseUrl: opts.targetBaseUrl ?? null,
+        items: planned,
+      };
+    }
+
+    const execution: ReplaySessionExecutionItem[] = [];
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (const source of sourceItems) {
+      const startedAt = Date.now();
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const method = source.method.toUpperCase();
+        const withBody = !["GET", "HEAD"].includes(method) && source.bodyBuffer.length > 0;
+        const response = await fetch(source.targetUrl, {
+          method,
+          headers: source.headers,
+          body: withBody ? source.body : undefined,
+          redirect: "manual",
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+
+        const responseBuffer = Buffer.from(await response.arrayBuffer());
+        const responseBodyText = responseBuffer.toString("utf8");
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((value, key) => {
+          responseHeaders[key.toLowerCase()] = value;
+        });
+        const parsedTarget = new URL(source.targetUrl);
+        const durationMs = Date.now() - startedAt;
+        const replayExchangeId = `replay_${randomUUID()}`;
+        const captured: CapturedExchange = {
+          id: replayExchangeId,
+          timestamp: startedAt,
+          request: {
+            method,
+            url: source.targetUrl,
+            hostname: parsedTarget.hostname,
+            path: `${parsedTarget.pathname}${parsedTarget.search}`,
+            headers: source.headers,
+            bodyPreview: capString(source.body, MAX_BODY_PREVIEW),
+            bodySize: source.bodyBuffer.length,
+          },
+          response: {
+            statusCode: response.status,
+            statusMessage: response.statusText,
+            headers: responseHeaders,
+            bodyPreview: capString(responseBodyText, MAX_BODY_PREVIEW),
+            bodySize: responseBuffer.length,
+          },
+          duration: durationMs,
+        };
+        this.pushTraffic(captured);
+        if (this.sessionStore.isActive()) {
+          const captureFullBodies = this.sessionStore.getActiveProfile() === "full";
+          this.sessionStore.recordExchange(captured, {
+            requestBody: captureFullBodies ? source.bodyBuffer : undefined,
+            responseBody: captureFullBodies ? responseBuffer : undefined,
+          });
+        }
+
+        execution.push({
+          seq: source.seq,
+          exchangeId: source.exchangeId,
+          method,
+          originalUrl: source.originalUrl,
+          targetUrl: source.targetUrl,
+          hostname: source.hostname,
+          hasRequestBody: source.bodyBuffer.length > 0,
+          status: "success",
+          durationMs,
+          responseStatus: response.status,
+          responseSize: responseBuffer.length,
+          replayExchangeId,
+        });
+        successCount++;
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        execution.push({
+          seq: source.seq,
+          exchangeId: source.exchangeId,
+          method: source.method,
+          originalUrl: source.originalUrl,
+          targetUrl: source.targetUrl,
+          hostname: source.hostname,
+          hasRequestBody: source.bodyBuffer.length > 0,
+          status: "error",
+          durationMs: Date.now() - startedAt,
+          error: message,
+        });
+        errorCount++;
+      }
+    }
+
+    return {
+      mode,
+      sessionId,
+      selectedCount: planned.length,
+      executedCount: execution.length,
+      successCount,
+      errorCount,
+      targetBaseUrl: opts.targetBaseUrl ?? null,
+      items: execution,
+    };
   }
 
   // ── TLS Fingerprinting ──

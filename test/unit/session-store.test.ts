@@ -94,5 +94,74 @@ describe("SessionStore", () => {
     assert.equal(recovered.recovered[0].sessionId, session.id);
     assert.ok(recovered.recovered[0].droppedTailBytes > 0);
   });
-});
 
+  it("imports HAR into a persisted session", async () => {
+    const dir = await makeTempDir();
+    const store = new SessionStore(dir);
+
+    const harPath = path.join(dir, "sample.har");
+    const har = {
+      log: {
+        version: "1.2",
+        creator: { name: "test", version: "1.0.0" },
+        entries: [
+          {
+            startedDateTime: "2026-01-01T10:00:00.000Z",
+            time: 25,
+            request: {
+              method: "GET",
+              url: "https://example.com/api/v1/items?x=1",
+              headers: [{ name: "accept", value: "application/json" }],
+              bodySize: 0,
+            },
+            response: {
+              status: 200,
+              statusText: "OK",
+              headers: [{ name: "content-type", value: "application/json" }],
+              bodySize: 13,
+              content: { text: "{\"ok\":true}" },
+            },
+          },
+          {
+            startedDateTime: "2026-01-01T10:00:01.000Z",
+            time: 10,
+            request: {
+              method: "GET",
+              url: "",
+              headers: [],
+            },
+            response: {
+              status: 500,
+              statusText: "Error",
+              headers: [],
+              bodySize: 0,
+              content: { text: "" },
+            },
+          },
+        ],
+      },
+    };
+    await fs.writeFile(harPath, JSON.stringify(har), "utf8");
+
+    const imported = await store.importHar({
+      harFile: harPath,
+      sessionName: "import-test",
+      strict: false,
+    });
+    assert.equal(imported.importSummary.totalEntries, 2);
+    assert.equal(imported.importSummary.importedEntries, 1);
+    assert.equal(imported.importSummary.skippedEntries, 1);
+    assert.equal(imported.session.status, "stopped");
+
+    const query = await store.querySession(imported.session.id, { limit: 10, offset: 0 });
+    assert.equal(query.total, 1);
+    assert.equal(query.items[0].hostname, "example.com");
+
+    const exchange = await store.getSessionExchange(imported.session.id, {
+      exchangeId: query.items[0].exchangeId,
+      includeBody: true,
+    });
+    assert.equal(exchange.record?.exchange.response?.statusCode, 200);
+    assert.equal(exchange.record?.responseBodyText, "{\"ok\":true}");
+  });
+});

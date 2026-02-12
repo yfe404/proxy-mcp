@@ -8,6 +8,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { CapturedExchange } from "./state.js";
+import { capString } from "./utils.js";
 
 export type CaptureProfile = "preview" | "full";
 export type SessionRecoveryState = "clean" | "recovered" | "error";
@@ -62,6 +63,7 @@ export interface SessionIndexEntry {
   matchedRuleId: string | null;
   ja3: string | null;
   ja4: string | null;
+  ja3s?: string | null;
   recordOffset: number;
   recordLineBytes: number;
 }
@@ -94,6 +96,25 @@ export interface SessionQueryResult {
   items: SessionIndexEntry[];
 }
 
+export interface HarImportOptions {
+  harFile: string;
+  sessionName?: string;
+  storageDir?: string;
+  maxDiskMb?: number;
+  strict?: boolean;
+}
+
+export interface HarImportSummary {
+  sourceFile: string;
+  totalEntries: number;
+  importedEntries: number;
+  skippedEntries: number;
+  errorCount: number;
+  firstTimestamp: number | null;
+  lastTimestamp: number | null;
+  warnings: string[];
+}
+
 export interface SessionRuntimeStatus {
   enabled: boolean;
   sessionId: string | null;
@@ -124,6 +145,8 @@ const MANIFEST_FILENAME = "manifest.json";
 const RECORDS_FILENAME = "records.ndjson";
 const INDEX_FILENAME = "index.ndjson";
 const DEFAULT_MAX_DISK_MB = 1024;
+const IMPORT_BODY_PREVIEW_MAX = 4096;
+const IMPORT_WARNING_LIMIT = 100;
 
 function randomSuffix(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -168,6 +191,37 @@ function queryToHar(url: string): Array<{ name: string; value: string }> {
 
 function fileSizeMb(bytes: number): number {
   return Math.round((bytes / (1024 * 1024)) * 100) / 100;
+}
+
+function headersArrayToRecord(headers: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!Array.isArray(headers)) return out;
+  for (const h of headers) {
+    if (!h || typeof h !== "object") continue;
+    const obj = h as Record<string, unknown>;
+    if (typeof obj.name !== "string") continue;
+    if (typeof obj.value !== "string") continue;
+    const key = obj.name.toLowerCase();
+    if (out[key]) {
+      out[key] = `${out[key]}, ${obj.value}`;
+    } else {
+      out[key] = obj.value;
+    }
+  }
+  return out;
+}
+
+function decodeHarText(text: string, encoding?: string): Buffer {
+  if ((encoding ?? "").toLowerCase() === "base64") {
+    return Buffer.from(text, "base64");
+  }
+  return Buffer.from(text, "utf8");
+}
+
+function pushWarning(target: string[], warning: string): void {
+  if (target.length < IMPORT_WARNING_LIMIT) {
+    target.push(warning);
+  }
 }
 
 export class SessionStore {
@@ -319,6 +373,97 @@ export class SessionStore {
     const manifestPath = path.join(this.rootDir, sessionId, MANIFEST_FILENAME);
     const raw = await fs.readFile(manifestPath, "utf8");
     return JSON.parse(raw) as SessionManifest;
+  }
+
+  async importHar(opts: HarImportOptions): Promise<{ session: SessionManifest; importSummary: HarImportSummary }> {
+    if (this.active) {
+      throw new Error(`Session '${this.active.manifest.id}' is already active. Stop it before importing HAR.`);
+    }
+
+    const strict = opts.strict ?? false;
+    const sourceFile = path.resolve(opts.harFile);
+    const raw = await fs.readFile(sourceFile, "utf8");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(`Invalid HAR JSON: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    const log = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).log : undefined;
+    const entriesRaw = log && typeof log === "object" ? (log as Record<string, unknown>).entries : undefined;
+    if (!Array.isArray(entriesRaw)) {
+      throw new Error("Invalid HAR: missing log.entries array.");
+    }
+
+    const importSummary: HarImportSummary = {
+      sourceFile,
+      totalEntries: entriesRaw.length,
+      importedEntries: 0,
+      skippedEntries: 0,
+      errorCount: 0,
+      firstTimestamp: null,
+      lastTimestamp: null,
+      warnings: [],
+    };
+
+    const defaultName = path.basename(sourceFile, path.extname(sourceFile));
+    const started = await this.startSession({
+      sessionName: opts.sessionName ?? `har-import-${defaultName}`,
+      captureProfile: "full",
+      storageDir: opts.storageDir,
+      maxDiskMb: opts.maxDiskMb,
+    });
+
+    let failed = false;
+    let failReason = "";
+
+    for (let i = 0; i < entriesRaw.length; i++) {
+      const converted = this.convertHarEntry(entriesRaw[i], i + 1, started.id);
+      if (!converted.ok) {
+        importSummary.errorCount++;
+        importSummary.skippedEntries++;
+        pushWarning(importSummary.warnings, converted.error);
+        if (strict) {
+          failed = true;
+          failReason = converted.error;
+          break;
+        }
+        continue;
+      }
+
+      const { exchange, requestBody, responseBody, warnings } = converted;
+      for (const warning of warnings) {
+        pushWarning(importSummary.warnings, warning);
+      }
+
+      this.recordExchange(exchange, {
+        requestBody,
+        responseBody,
+      });
+      importSummary.importedEntries++;
+      if (importSummary.firstTimestamp === null || exchange.timestamp < importSummary.firstTimestamp) {
+        importSummary.firstTimestamp = exchange.timestamp;
+      }
+      if (importSummary.lastTimestamp === null || exchange.timestamp > importSummary.lastTimestamp) {
+        importSummary.lastTimestamp = exchange.timestamp;
+      }
+    }
+
+    const stopped = await this.stopSession();
+    if (!stopped) {
+      throw new Error("Failed to finalize imported HAR session.");
+    }
+
+    if (failed) {
+      await this.deleteSession(stopped.id).catch(() => {});
+      throw new Error(failReason);
+    }
+
+    return {
+      session: stopped,
+      importSummary,
+    };
   }
 
   recordExchange(
@@ -770,9 +915,146 @@ export class SessionStore {
       matchedRuleId: exchange.matchedRuleId ?? null,
       ja3: exchange.tls?.client?.ja3Fingerprint ?? null,
       ja4: exchange.tls?.client?.ja4Fingerprint ?? null,
+      ja3s: exchange.tls?.server?.ja3sFingerprint ?? null,
       recordOffset: location.recordOffset,
       recordLineBytes: location.recordLineBytes,
     };
+  }
+
+  private convertHarEntry(
+    entry: unknown,
+    seq: number,
+    sessionId: string,
+  ):
+    | {
+      ok: true;
+      exchange: CapturedExchange;
+      requestBody?: Buffer;
+      responseBody?: Buffer;
+      warnings: string[];
+    }
+    | { ok: false; error: string } {
+    if (!entry || typeof entry !== "object") {
+      return { ok: false, error: `HAR entry #${seq}: entry is not an object.` };
+    }
+    const e = entry as Record<string, unknown>;
+
+    const requestObj = e.request;
+    if (!requestObj || typeof requestObj !== "object") {
+      return { ok: false, error: `HAR entry #${seq}: missing request object.` };
+    }
+    const req = requestObj as Record<string, unknown>;
+    if (typeof req.method !== "string" || req.method.length === 0) {
+      return { ok: false, error: `HAR entry #${seq}: missing request.method.` };
+    }
+    if (typeof req.url !== "string" || req.url.length === 0) {
+      return { ok: false, error: `HAR entry #${seq}: missing request.url.` };
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(req.url);
+    } catch (err) {
+      return {
+        ok: false,
+        error: `HAR entry #${seq}: invalid request.url (${err instanceof Error ? err.message : String(err)}).`,
+      };
+    }
+
+    const warnings: string[] = [];
+    const requestHeaders = headersArrayToRecord(req.headers);
+    const requestPostData = req.postData && typeof req.postData === "object"
+      ? req.postData as Record<string, unknown>
+      : null;
+    const requestBody = requestPostData && typeof requestPostData.text === "string"
+      ? decodeHarText(requestPostData.text, typeof requestPostData.encoding === "string" ? requestPostData.encoding : undefined)
+      : undefined;
+    const requestBodyText = requestBody ? requestBody.toString("utf8") : "";
+    const requestBodySize = typeof req.bodySize === "number" && Number.isFinite(req.bodySize) && req.bodySize >= 0
+      ? req.bodySize
+      : requestBody?.length ?? 0;
+
+    let timestamp = Date.now();
+    if (typeof e.startedDateTime === "string") {
+      const parsed = Date.parse(e.startedDateTime);
+      if (Number.isFinite(parsed)) {
+        timestamp = parsed;
+      } else {
+        warnings.push(`HAR entry #${seq}: invalid startedDateTime, using import time.`);
+      }
+    } else {
+      warnings.push(`HAR entry #${seq}: missing startedDateTime, using import time.`);
+    }
+
+    const responseObj = e.response && typeof e.response === "object"
+      ? e.response as Record<string, unknown>
+      : null;
+
+    let response:
+      | {
+        statusCode: number;
+        statusMessage: string;
+        headers: Record<string, string>;
+        bodyPreview: string;
+        bodySize: number;
+      }
+      | undefined;
+    let responseBody: Buffer | undefined;
+
+    if (responseObj) {
+      const responseHeaders = headersArrayToRecord(responseObj.headers);
+      const contentObj = responseObj.content && typeof responseObj.content === "object"
+        ? responseObj.content as Record<string, unknown>
+        : null;
+
+      if (contentObj && typeof contentObj.text === "string") {
+        responseBody = decodeHarText(
+          contentObj.text,
+          typeof contentObj.encoding === "string" ? contentObj.encoding : undefined,
+        );
+      }
+
+      const statusCodeRaw = responseObj.status;
+      const statusCode = typeof statusCodeRaw === "number" && Number.isFinite(statusCodeRaw)
+        ? Math.max(0, Math.trunc(statusCodeRaw))
+        : 0;
+      const statusMessage = typeof responseObj.statusText === "string" ? responseObj.statusText : "";
+      const responseBodySize = typeof responseObj.bodySize === "number" && Number.isFinite(responseObj.bodySize) && responseObj.bodySize >= 0
+        ? responseObj.bodySize
+        : responseBody?.length ?? 0;
+      const responseBodyText = responseBody ? responseBody.toString("utf8") : "";
+      response = {
+        statusCode,
+        statusMessage,
+        headers: responseHeaders,
+        bodyPreview: capString(responseBodyText, IMPORT_BODY_PREVIEW_MAX),
+        bodySize: responseBodySize,
+      };
+    } else {
+      warnings.push(`HAR entry #${seq}: missing response object.`);
+    }
+
+    const duration = typeof e.time === "number" && Number.isFinite(e.time)
+      ? Math.max(0, Math.round(e.time))
+      : undefined;
+
+    const exchange: CapturedExchange = {
+      id: `har_${sessionId}_${seq}`,
+      timestamp,
+      request: {
+        method: req.method.toUpperCase(),
+        url: req.url,
+        hostname: parsedUrl.hostname,
+        path: `${parsedUrl.pathname}${parsedUrl.search}`,
+        headers: requestHeaders,
+        bodyPreview: capString(requestBodyText, IMPORT_BODY_PREVIEW_MAX),
+        bodySize: requestBodySize,
+      },
+      ...(response ? { response } : {}),
+      ...(duration !== undefined ? { duration } : {}),
+    };
+
+    return { ok: true, exchange, requestBody, responseBody, warnings };
   }
 
   private async readSessionIndex(sessionId: string): Promise<SessionIndexEntry[]> {
@@ -826,4 +1108,3 @@ export class SessionStore {
     await fs.rename(tmp, manifestPath);
   }
 }
-

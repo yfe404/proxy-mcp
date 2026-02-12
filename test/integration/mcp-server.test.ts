@@ -1,5 +1,9 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { tmpdir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -50,7 +54,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 64 tools", async () => {
+  it("lists all 67 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -104,7 +108,10 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_export_har"));
     assert.ok(names.includes("proxy_delete_session"));
     assert.ok(names.includes("proxy_session_recover"));
-    assert.equal(names.length, 64);
+    assert.ok(names.includes("proxy_import_har"));
+    assert.ok(names.includes("proxy_replay_session"));
+    assert.ok(names.includes("proxy_get_session_handshakes"));
+    assert.equal(names.length, 67);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {
@@ -239,5 +246,112 @@ describe("MCP Server Integration", () => {
     assert.ok(testData.result.evaluatedCount >= 1);
     assert.equal(testData.result.effectiveWinner?.ruleId, addData.rule.id);
     assert.equal(testData.result.results[0].checks.pathPattern.passed, true);
+  });
+
+  it("imports HAR and replays entries", async (t) => {
+    const { client, cleanup: c } = await createTestSetup();
+    cleanup = c;
+
+    const server = http.createServer((req, res) => {
+      const body = `ok:${req.method}:${req.url}`;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(body);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve());
+      });
+    } catch (e) {
+      const err = String(e);
+      if (/EPERM|EACCES/i.test(err)) {
+        t.skip("listen() not permitted in this environment");
+        return;
+      }
+      throw e;
+    }
+
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      const targetUrl = `http://127.0.0.1:${address.port}/api/har-replay?x=1`;
+
+      const tmpDir = await fs.mkdtemp(path.join(tmpdir(), "proxy-mcp-har-int-"));
+      const harPath = path.join(tmpDir, "import.har");
+      const har = {
+        log: {
+          version: "1.2",
+          creator: { name: "test", version: "1.0.0" },
+          entries: [
+            {
+              startedDateTime: "2026-01-01T10:00:00.000Z",
+              time: 12,
+              request: {
+                method: "GET",
+                url: targetUrl,
+                headers: [{ name: "accept", value: "text/plain" }],
+                bodySize: 0,
+              },
+              response: {
+                status: 200,
+                statusText: "OK",
+                headers: [{ name: "content-type", value: "text/plain" }],
+                bodySize: 2,
+                content: { text: "ok" },
+              },
+            },
+          ],
+        },
+      };
+      await fs.writeFile(harPath, JSON.stringify(har), "utf8");
+
+      const importRes = await client.callTool({
+        name: "proxy_import_har",
+        arguments: {
+          har_file: harPath,
+          session_name: "integration-har-import",
+        },
+      });
+      const importData = JSON.parse((importRes.content as Array<{ text: string }>)[0].text);
+      assert.equal(importData.status, "success");
+      assert.equal(importData.importSummary.importedEntries, 1);
+      const sessionId = importData.session.id as string;
+
+      const hsRes = await client.callTool({
+        name: "proxy_get_session_handshakes",
+        arguments: { session_id: sessionId },
+      });
+      const hsData = JSON.parse((hsRes.content as Array<{ text: string }>)[0].text);
+      assert.equal(hsData.status, "success");
+      assert.equal(hsData.withTlsMetadata, 0);
+
+      const dryRunRes = await client.callTool({
+        name: "proxy_replay_session",
+        arguments: { session_id: sessionId, mode: "dry_run", limit: 10 },
+      });
+      const dryRunData = JSON.parse((dryRunRes.content as Array<{ text: string }>)[0].text);
+      assert.equal(dryRunData.status, "success");
+      assert.equal(dryRunData.mode, "dry_run");
+      assert.equal(dryRunData.selectedCount, 1);
+
+      const execRes = await client.callTool({
+        name: "proxy_replay_session",
+        arguments: { session_id: sessionId, mode: "execute", limit: 10, timeout_ms: 5000 },
+      });
+      const execData = JSON.parse((execRes.content as Array<{ text: string }>)[0].text);
+      assert.equal(execData.status, "success");
+      assert.equal(execData.mode, "execute");
+      assert.equal(execData.successCount, 1);
+
+      const trafficRes = await client.callTool({
+        name: "proxy_list_traffic",
+        arguments: { limit: 10 },
+      });
+      const trafficData = JSON.parse((trafficRes.content as Array<{ text: string }>)[0].text);
+      assert.equal(trafficData.status, "success");
+      assert.ok(trafficData.count >= 1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
