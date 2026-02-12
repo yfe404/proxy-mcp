@@ -752,7 +752,7 @@ export class ProxyManager {
       withTlsMetadata,
       withoutTlsMetadata: Math.max(0, all.total - withTlsMetadata),
       unavailableReason:
-        "HAR imports usually do not include TLS handshake fingerprints. Replay through live proxy capture for JA3/JA4/JA3S.",
+        "HAR imports and proxy_replay_session entries do not include TLS handshake fingerprints. Use live proxy-captured traffic for JA3/JA4/JA3S.",
       items,
     };
   }

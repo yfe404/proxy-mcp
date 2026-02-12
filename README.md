@@ -179,7 +179,7 @@ proxy_replay_session --session_id SESSION_ID --mode execute --limit 20
 proxy_replay_session --session_id SESSION_ID --mode execute --target_base_url "http://127.0.0.1:8081"
 ```
 
-Note: imported HAR entries typically have no JA3/JA4/JA3S handshake metadata. Capture live traffic or replay through active interception to analyze fresh handshake fingerprints.
+Note: imported HAR entries (and entries created by `proxy_replay_session`) do not carry JA3/JA4/JA3S handshake metadata. Use live proxy-captured traffic to analyze handshake fingerprints.
 
 ## Setup
 
