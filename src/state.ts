@@ -1074,19 +1074,6 @@ export class ProxyManager {
             }
 
             try {
-              // Extract cookies from the intercepted request's cookie header
-              let cookies: { [key: string]: string } | undefined;
-              const cookieHeader = (req.headers as Record<string, string>)["cookie"];
-              if (cookieHeader) {
-                cookies = {};
-                for (const pair of cookieHeader.split(";")) {
-                  const eq = pair.indexOf("=");
-                  if (eq > 0) {
-                    cookies[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
-                  }
-                }
-              }
-
               const result = await spoofedRequest(req.url, {
                 method: req.method,
                 headers: req.headers as Record<string, string>,
@@ -1100,7 +1087,6 @@ export class ProxyManager {
                 disableRedirect: spoofConfig.disableRedirect,
                 forceHTTP1: spoofConfig.forceHTTP1,
                 insecureSkipVerify: spoofConfig.insecureSkipVerify,
-                cookies,
               });
 
               return {

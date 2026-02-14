@@ -187,7 +187,7 @@ export function registerTlsTools(server: McpServer): void {
             hostPatterns: host_patterns,
             http2Fingerprint: http2_fingerprint,
             headerOrder: header_order,
-            orderAsProvided: order_as_provided,
+            orderAsProvided: order_as_provided ?? (header_order ? true : undefined),
             disableGrease: disable_grease,
             disableRedirect: disable_redirect,
             forceHTTP1: force_http1,

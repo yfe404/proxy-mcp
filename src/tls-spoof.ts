@@ -6,7 +6,6 @@
  */
 
 import type { CycleTLSClient, CycleTLSRequestOptions } from "cycletls";
-import { gunzipSync, brotliDecompressSync, inflateSync } from "node:zlib";
 
 let instance: CycleTLSClient | null = null;
 let initPromise: Promise<CycleTLSClient> | null = null;
@@ -34,7 +33,7 @@ async function getCycleTLS(): Promise<CycleTLSClient> {
 export interface SpoofedResponse {
   status: number;
   headers: Record<string, string>;
-  body: string;
+  body: Buffer;
 }
 
 export interface SpoofOptions {
@@ -51,7 +50,66 @@ export interface SpoofOptions {
   disableRedirect?: boolean;
   forceHTTP1?: boolean;
   insecureSkipVerify?: boolean;
-  cookies?: Array<object> | { [key: string]: string };
+}
+
+/** @internal */
+export function responseDataToBuffer(data: unknown): Buffer {
+  if (!data) return Buffer.alloc(0);
+  if (typeof data === "string") return Buffer.from(data, "utf-8");
+  if (data instanceof ArrayBuffer) return Buffer.from(data);
+  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+
+  // Some libraries serialize Buffers as { type: "Buffer", data: number[] }
+  if (typeof data === "object") {
+    const maybe = data as { type?: unknown; data?: unknown };
+    if (maybe.type === "Buffer" && Array.isArray(maybe.data)) {
+      return Buffer.from(maybe.data as number[]);
+    }
+  }
+
+  try {
+    return Buffer.from(JSON.stringify(data), "utf-8");
+  } catch {
+    return Buffer.from(String(data), "utf-8");
+  }
+}
+
+function getHeader(headers: Record<string, string>, name: string): string | undefined {
+  const needle = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === needle) return v;
+  }
+  return undefined;
+}
+
+/** @internal */
+export function stripHopByHopHeaders(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+
+  // RFC 9110: Connection is hop-by-hop and may list additional hop-by-hop headers.
+  const connection = getHeader(headers, "connection");
+  const connectionTokens = new Set<string>();
+  if (connection) {
+    for (const token of connection.split(",")) {
+      const t = token.trim().toLowerCase();
+      if (t) connectionTokens.add(t);
+    }
+  }
+
+  for (const [k, v] of Object.entries(headers)) {
+    const kl = k.toLowerCase();
+    if (kl === "connection") continue;
+    if (connectionTokens.has(kl)) continue;
+    if (kl === "proxy-connection") continue;
+    if (kl === "keep-alive") continue;
+    if (kl === "transfer-encoding") continue;
+    if (kl === "upgrade") continue;
+    if (kl === "proxy-authenticate") continue;
+    if (kl === "proxy-authorization") continue;
+    out[k] = v;
+  }
+
+  return out;
 }
 
 /**
@@ -98,12 +156,16 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
     ? reorderHeaders(opts.headers, opts.headerOrder)
     : (opts.headers || {});
 
+  const sanitizedHeaders = stripHopByHopHeaders(headers);
+
   const requestOpts: CycleTLSRequestOptions = {
     ja3: opts.ja3,
-    userAgent: opts.userAgent || headers["user-agent"] || "",
-    headers,
+    userAgent: opts.userAgent || getHeader(sanitizedHeaders, "user-agent") || "",
+    headers: sanitizedHeaders,
     body: opts.body || "",
     proxy: opts.proxy || "",
+    // Avoid CycleTLS parsing JSON; we want raw bytes so we can forward binary safely.
+    responseType: "arraybuffer",
   };
 
   // Conditionally include new CycleTLS fields (only when defined)
@@ -114,7 +176,6 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
   if (opts.disableRedirect !== undefined) requestOpts.disableRedirect = opts.disableRedirect;
   if (opts.forceHTTP1 !== undefined) requestOpts.forceHTTP1 = opts.forceHTTP1;
   if (opts.insecureSkipVerify !== undefined) requestOpts.insecureSkipVerify = opts.insecureSkipVerify;
-  if (opts.cookies !== undefined) requestOpts.cookies = opts.cookies;
 
   const response = await cycle(url, requestOpts, opts.method.toLowerCase() as "get" | "post" | "put" | "delete" | "patch" | "head" | "options");
 
@@ -126,41 +187,11 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
     }
   }
 
-  // CycleTLS may return compressed data as a Buffer-like object.
-  // Decompress it and strip the content-encoding header so the
-  // downstream proxy can serve it as plain text to the browser.
-  let body: string;
-  const encoding = responseHeaders["content-encoding"];
+  const body = responseDataToBuffer(response.data);
 
-  if (typeof response.data !== "string" && response.data && typeof response.data === "object") {
-    // Buffer-like: { type: "Buffer", data: number[] }
-    const buf = Buffer.from(
-      (response.data as { type?: string; data?: number[] }).data ?? response.data as unknown as number[],
-    );
-    try {
-      if (encoding === "gzip" || encoding === "x-gzip") {
-        body = gunzipSync(buf).toString("utf-8");
-        delete responseHeaders["content-encoding"];
-      } else if (encoding === "br") {
-        body = brotliDecompressSync(buf).toString("utf-8");
-        delete responseHeaders["content-encoding"];
-      } else if (encoding === "deflate") {
-        body = inflateSync(buf).toString("utf-8");
-        delete responseHeaders["content-encoding"];
-      } else {
-        body = buf.toString("utf-8");
-      }
-    } catch {
-      // If decompression fails, pass raw bytes as utf-8
-      body = buf.toString("utf-8");
-    }
-  } else {
-    body = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
-  }
-
-  // Remove content-length since decompression changes the size
+  // Let mockttp compute length/transfer encoding after any automatic
+  // Content-Encoding transformation.
   delete responseHeaders["content-length"];
-  // Remove transfer-encoding since we're returning a complete body
   delete responseHeaders["transfer-encoding"];
 
   return {

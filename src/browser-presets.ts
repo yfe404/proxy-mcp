@@ -31,7 +31,6 @@ const PRESETS: Record<string, BrowserPreset> = {
     http2Fingerprint: "1:65536;2:0;3:1000;4:6291456;6:262144|15663105|0:1:256:0,3:0:0:200,5:0:0:168,7:0:0:168,9:0:0:168,11:0:0:168,13:0:0:240|m,a,s,p",
     headerOrder: [
       "host",
-      "connection",
       "content-length",
       "sec-ch-ua",
       "sec-ch-ua-mobile",
@@ -59,7 +58,6 @@ const PRESETS: Record<string, BrowserPreset> = {
     http2Fingerprint: "1:65536;2:0;3:1000;4:6291456;6:262144|15663105|0:1:256:0,3:0:0:200,5:0:0:168,7:0:0:168,9:0:0:168,11:0:0:168,13:0:0:240|m,a,s,p",
     headerOrder: [
       "host",
-      "connection",
       "content-length",
       "sec-ch-ua",
       "sec-ch-ua-mobile",
@@ -92,7 +90,6 @@ const PRESETS: Record<string, BrowserPreset> = {
       "accept-language",
       "accept-encoding",
       "referer",
-      "connection",
       "cookie",
       "upgrade-insecure-requests",
       "sec-fetch-dest",
