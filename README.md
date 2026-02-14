@@ -2,13 +2,13 @@
 
 proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. It also ships "interceptors" to route Chrome, CLI tools, Docker containers, and Android devices/apps through the proxy.
 
-73 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
+75 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
 
 ### Boundaries
 
 - Only sees traffic **configured to route through it** (not a network tap or packet sniffer)
-- Spoofs **outgoing JA3 only** (via CycleTLS), not JA4 (JA4 is capture-only)
-- Can add, overwrite, or delete HTTP headers — does **not** control header order
+- Spoofs **outgoing JA3 + HTTP/2 fingerprint + header order** (via CycleTLS), not JA4 (JA4 is capture-only)
+- Can add, overwrite, or delete HTTP headers; outgoing header **order** can be controlled via fingerprint spoofing
 - Returns its own CA certificate — does **not** expose upstream server certificate chains
 
 ### Pairs well with CDP/Playwright
@@ -23,7 +23,7 @@ Use CDP/Playwright for browser internals (DOM, JS execution, localStorage, cooki
 | Modify requests in-flight (headers, body, mock, drop) | Via route/intercept handlers | Yes (declarative rules, hot-reload) |
 | Upstream proxy chaining (geo, auth) | Single browser via `--proxy-server` | Global + per-host upstreams across all clients (SOCKS4/5, HTTP, HTTPS, PAC) |
 | TLS fingerprint capture (JA3/JA4/JA3S) | No | Yes |
-| JA3 spoofing | No | Proxy-side only (CycleTLS re-issues matching requests with spoofed JA3; does not alter the client's TLS handshake) |
+| JA3 + HTTP/2 fingerprint spoofing | No | Proxy-side only (CycleTLS re-issues matching requests with spoofed JA3, HTTP/2 frames, and header order; does not alter the client's TLS handshake) |
 | Intercept non-browser traffic (curl, Python, Android apps) | No | Yes (interceptors) |
 
 A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through proxy automatically), drive pages with Playwright/CDP, and use proxy-mcp to capture the wire traffic, inject headers, or spoof JA3 — all in the same session.
@@ -293,7 +293,7 @@ proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
 | `proxy_rewrite_url` | Rewrite request URLs |
 | `proxy_mock_response` | Return mock response for matched requests |
 
-### TLS Fingerprinting (6)
+### TLS Fingerprinting (8)
 
 | Tool | Description |
 |------|-------------|
@@ -303,8 +303,10 @@ proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
 | `proxy_clear_ja3_spoof` | Disable JA3 spoofing and shut down CycleTLS |
 | `proxy_get_tls_config` | Return current TLS config (server capture, JA3 spoof state) |
 | `proxy_enable_server_tls_capture` | Toggle server-side JA3S capture (monkey-patches `tls.connect`) |
+| `proxy_set_fingerprint_spoof` | Enable full fingerprint spoofing: JA3 + HTTP/2 frames + header order. Supports browser presets. |
+| `proxy_list_fingerprint_presets` | List available browser fingerprint presets (e.g. `chrome_131`, `chrome_136`, `firefox_133`) |
 
-JA3 spoofing works by re-issuing the request from the proxy via CycleTLS with a specified JA3 string. The origin server sees the proxy's spoofed fingerprint, not the original client's. JA4 fingerprints are captured (read-only) but spoofing is not supported.
+Fingerprint spoofing works by re-issuing the request from the proxy via CycleTLS. The origin server sees the proxy's spoofed TLS (JA3), HTTP/2 (SETTINGS/WINDOW_UPDATE/PRIORITY frames), and header order — not the original client's. Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup, or specify individual parameters for fine-grained control. `proxy_set_ja3_spoof` is kept for backward compatibility (JA3-only). JA4 fingerprints are captured (read-only) but spoofing is not supported.
 
 ### Interceptors (18)
 
@@ -462,6 +464,8 @@ proxy_search_traffic --query "error"
 # TLS fingerprinting
 proxy_list_tls_fingerprints                # See unique JA3/JA4 fingerprints
 proxy_set_ja3_spoof --ja3 "771,4865-..."   # Spoof outgoing JA3
+proxy_set_fingerprint_spoof --preset chrome_136 --host_patterns '["example.com"]'  # Full fingerprint spoof
+proxy_list_fingerprint_presets                  # Available browser presets
 
 # Query/export recorded session
 proxy_list_sessions
