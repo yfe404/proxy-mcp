@@ -306,7 +306,7 @@ proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
 | `proxy_set_fingerprint_spoof` | Enable full fingerprint spoofing: JA3 + HTTP/2 frames + header order. Supports browser presets. |
 | `proxy_list_fingerprint_presets` | List available browser fingerprint presets (e.g. `chrome_131`, `chrome_136`, `firefox_133`) |
 
-Fingerprint spoofing works by re-issuing the request from the proxy via CycleTLS. The origin server sees the proxy's spoofed TLS (JA3), HTTP/2 (SETTINGS/WINDOW_UPDATE/PRIORITY frames), and header order — not the original client's. Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup, or specify individual parameters for fine-grained control. `proxy_set_ja3_spoof` is kept for backward compatibility (JA3-only). JA4 fingerprints are captured (read-only) but spoofing is not supported.
+Fingerprint spoofing works by re-issuing the request from the proxy via CycleTLS. The origin server sees the proxy's spoofed TLS (JA3), HTTP/2 (SETTINGS/WINDOW_UPDATE/PRIORITY frames), and header order — not the original client's. When a `user_agent` is set (including via presets), proxy-mcp also normalizes Chromium UA Client Hints headers (`sec-ch-ua*`) to match the spoofed User-Agent (forwarding contradictory hints is a common bot signal). Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup, or specify individual parameters for fine-grained control. `proxy_set_ja3_spoof` is kept for backward compatibility (JA3-only). JA4 fingerprints are captured (read-only) but spoofing is not supported.
 
 ### Interceptors (18)
 
