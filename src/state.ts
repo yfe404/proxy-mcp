@@ -1093,7 +1093,9 @@ export class ProxyManager {
                 response: {
                   statusCode: result.status,
                   headers: result.headers,
-                  body: result.body,
+                  // Use rawBody so mockttp doesn't auto content-encode based on Content-Encoding.
+                  // CycleTLS already returns the bytes as received from the origin.
+                  rawBody: result.body,
                 },
               };
             } catch {
