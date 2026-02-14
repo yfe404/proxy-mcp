@@ -50,6 +50,7 @@ export interface SpoofOptions {
   disableRedirect?: boolean;
   forceHTTP1?: boolean;
   insecureSkipVerify?: boolean;
+  cookies?: Array<object> | { [key: string]: string };
 }
 
 /** @internal */
@@ -152,20 +153,16 @@ export function reorderHeaders(
 export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<SpoofedResponse> {
   const cycle = await getCycleTLS();
 
-  const headers = opts.headerOrder && opts.headers
-    ? reorderHeaders(opts.headers, opts.headerOrder)
-    : (opts.headers || {});
-
-  const sanitizedHeaders = stripHopByHopHeaders(headers);
+  // Compatibility-first: send headers exactly as received from mockttp and let
+  // CycleTLS apply headerOrder/orderAsProvided if configured.
+  const headers = opts.headers || {};
 
   const requestOpts: CycleTLSRequestOptions = {
     ja3: opts.ja3,
-    userAgent: opts.userAgent || getHeader(sanitizedHeaders, "user-agent") || "",
-    headers: sanitizedHeaders,
+    userAgent: opts.userAgent || getHeader(headers, "user-agent") || "",
+    headers,
     body: opts.body || "",
     proxy: opts.proxy || "",
-    // Avoid CycleTLS parsing JSON; we want raw bytes so we can forward binary safely.
-    responseType: "arraybuffer",
   };
 
   // Conditionally include new CycleTLS fields (only when defined)
@@ -176,6 +173,7 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
   if (opts.disableRedirect !== undefined) requestOpts.disableRedirect = opts.disableRedirect;
   if (opts.forceHTTP1 !== undefined) requestOpts.forceHTTP1 = opts.forceHTTP1;
   if (opts.insecureSkipVerify !== undefined) requestOpts.insecureSkipVerify = opts.insecureSkipVerify;
+  if (opts.cookies !== undefined) requestOpts.cookies = opts.cookies;
 
   const response = await cycle(url, requestOpts, opts.method.toLowerCase() as "get" | "post" | "put" | "delete" | "patch" | "head" | "options");
 
@@ -187,7 +185,7 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
     }
   }
 
-  const body = responseDataToBuffer(response.data);
+  const body = Buffer.from(await response.arrayBuffer());
 
   // Let mockttp compute length/transfer encoding after any automatic
   // Content-Encoding transformation.

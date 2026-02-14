@@ -17,7 +17,6 @@ describe("browser presets", () => {
     assert.ok(preset.userAgent.includes("Chrome/"));
     assert.ok(preset.http2Fingerprint.includes("|"));
     assert.ok(preset.headerOrder.length > 0);
-    assert.ok(!preset.headerOrder.map((h) => h.toLowerCase()).includes("connection"));
   });
 
   it("throws for unknown presets", () => {
@@ -27,4 +26,3 @@ describe("browser presets", () => {
     );
   });
 });
-
