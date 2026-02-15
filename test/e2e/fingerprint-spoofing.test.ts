@@ -142,7 +142,7 @@ describe("E2E Fingerprint Spoofing", () => {
 
   // ── Test 1: Barnes & Noble ──
 
-  it("Barnes & Noble loads with spoofed fingerprint", { timeout: 120_000, todo: "Requires B&N Akamai challenge to be solvable through proxy" }, async () => {
+  it("Barnes & Noble loads with spoofed fingerprint", { timeout: 120_000 }, async () => {
     // Navigate to about:blank first to clear previous page state
     await cdpSession.send("Page.navigate", { url: "about:blank" }, { timeoutMs: 5_000 }).catch(() => {});
     await sleep(500);
@@ -151,14 +151,16 @@ describe("E2E Fingerprint Spoofing", () => {
     // The sensor script runs in Chrome, POSTs validation data, and solves the _abck cookie.
     cdpSession.send("Page.navigate", { url: "https://www.barnesandnoble.com/" }, { timeoutMs: 60_000 }).catch(() => {});
 
-    // Poll until we see B&N traffic with a response
+    // Poll until we see B&N traffic with a response.
+    // Use url_filter (not hostname_filter) because req.hostname can be empty
+    // for HTTPS requests handled via beforeRequest synthetic responses.
     let exchanges: Array<Record<string, unknown>> = [];
     for (let i = 0; i < 30; i++) {
       await sleep(2_000);
       const trafficRes = parseToolResult(
         await client.callTool({
           name: "proxy_list_traffic",
-          arguments: { limit: 100, hostname_filter: "barnesandnoble" },
+          arguments: { limit: 100, url_filter: "barnesandnoble.com" },
         }) as { content: Array<{ text: string }> },
       );
       exchanges = (trafficRes.exchanges ?? []) as Array<Record<string, unknown>>;
@@ -189,7 +191,7 @@ describe("E2E Fingerprint Spoofing", () => {
         const trafficRes = parseToolResult(
           await client.callTool({
             name: "proxy_list_traffic",
-            arguments: { limit: 100, hostname_filter: "barnesandnoble" },
+            arguments: { limit: 100, url_filter: "barnesandnoble.com" },
           }) as { content: Array<{ text: string }> },
         );
         retryExchanges = (trafficRes.exchanges ?? []) as Array<Record<string, unknown>>;

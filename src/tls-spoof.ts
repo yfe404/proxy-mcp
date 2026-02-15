@@ -13,12 +13,48 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Docker from "dockerode";
 import { resolveBrowserPreset } from "./browser-presets.js";
 
 const execFileAsync = promisify(execFile);
+
+// Detect container runtime: prefer docker, fall back to podman.
+let _containerCli: string | null = null;
+async function containerCli(): Promise<string> {
+  if (_containerCli) return _containerCli;
+  for (const bin of ["docker", "podman"]) {
+    try {
+      await execFileAsync(bin, ["--version"], { timeout: 5_000 });
+      _containerCli = bin;
+      return bin;
+    } catch { /* not found or not working — try next */ }
+  }
+  throw new Error("Neither docker nor podman found on PATH");
+}
+
+/**
+ * Create a dockerode instance, auto-detecting the container socket.
+ * Checks DOCKER_HOST first, then the default docker socket, then
+ * the podman user socket.
+ */
+function createDockerClient(): InstanceType<typeof Docker> {
+  if (process.env.DOCKER_HOST) return new Docker();
+
+  const defaultSocket = "/var/run/docker.sock";
+  if (fs.existsSync(defaultSocket)) return new Docker({ socketPath: defaultSocket });
+
+  const uid = process.getuid?.();
+  if (uid !== undefined) {
+    const podmanSocket = `/run/user/${uid}/podman/podman.sock`;
+    if (fs.existsSync(podmanSocket)) return new Docker({ socketPath: podmanSocket });
+  }
+
+  // Last resort — let dockerode try its default
+  return new Docker();
+}
 
 const IMAGE_NAME = "proxy-mcp-curl-impersonate";
 const CONTAINER_NAME = "proxy-mcp-curl-impersonate";
@@ -70,7 +106,7 @@ async function ensureSpoofContainer(): Promise<string> {
 
   if (!initPromise) {
     initPromise = (async () => {
-      const docker = new Docker();
+      const docker = createDockerClient();
 
       // Check if container already exists and is running
       try {
@@ -96,7 +132,8 @@ async function ensureSpoofContainer(): Promise<string> {
         const dockerfilePath = path.join(projectRoot, "Dockerfile.curl-impersonate");
 
         // Use execFile to build (simpler than dockerode tar stream)
-        await execFileAsync("docker", [
+        const cli = await containerCli();
+        await execFileAsync(cli, [
           "build",
           "-f", dockerfilePath,
           "-t", IMAGE_NAME,
@@ -286,7 +323,8 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
     }
   }
 
-  // Build the docker exec command
+  // Build the container exec command
+  const cli = await containerCli();
   const args: string[] = [
     "exec", cid,
     "curl-impersonate",
@@ -296,9 +334,30 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
     "--compressed",          // handle content-encoding
   ];
 
+  // Timeouts — fail fast on unreachable hosts instead of blocking
+  // for the full docker exec timeout. These don't alter the TLS fingerprint.
+  args.push("--connect-timeout", "15");
+  args.push("--max-time", "45");
+
+  // Cookies — forward via -b for explicit cookie jar behavior.
+  // Cookies also flow via -H "cookie: ..." from opts.headers; when -b is used
+  // the cookie header is stripped from -H to avoid duplication.
+  const hasCookies =
+    opts.cookies && typeof opts.cookies === "object" && !Array.isArray(opts.cookies);
+  if (hasCookies) {
+    const cookieStr = Object.entries(opts.cookies as Record<string, string>)
+      .map(([k, v]) => `${k}=${v}`)
+      .join("; ");
+    if (cookieStr) {
+      args.push("-b", cookieStr);
+    }
+  }
+
   // Headers
   const headers = opts.headers || {};
   for (const [k, v] of Object.entries(headers)) {
+    // Skip cookie header when using -b flag (avoid duplication)
+    if (k.toLowerCase() === "cookie" && hasCookies) continue;
     args.push("-H", `${k}: ${v}`);
   }
 
@@ -342,19 +401,21 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
   // URL must be last
   args.push(url);
 
-  const { stdout, stderr } = await execFileAsync("docker", args, {
+  const { stdout, stderr } = await execFileAsync(cli, args, {
     maxBuffer: 50 * 1024 * 1024,
     encoding: "buffer",
-    timeout: 120_000,
+    timeout: 60_000,  // curl's own --max-time handles the actual limit
   });
 
   // Parse response headers from stderr
   const { status, headers: responseHeaders } = parseResponseHeaders(stderr);
 
-  // Let mockttp compute length/transfer encoding after any automatic
-  // Content-Encoding transformation.
+  // curl-impersonate with --compressed decompresses the body but keeps the
+  // original content-encoding/content-length headers. Strip them so the
+  // client doesn't try to decompress already-decompressed data.
   delete responseHeaders["content-length"];
   delete responseHeaders["transfer-encoding"];
+  delete responseHeaders["content-encoding"];
 
   return {
     status,
@@ -372,7 +433,7 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
 export async function shutdownSpoofContainer(): Promise<void> {
   if (containerId) {
     try {
-      const docker = new Docker();
+      const docker = createDockerClient();
       const container = docker.getContainer(containerId);
       try { await container.stop({ t: 2 }); } catch { /* may already be stopped */ }
       try { await container.remove({ force: true }); } catch { /* may already be removed */ }
