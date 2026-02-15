@@ -143,7 +143,7 @@ export function registerTlsTools(server: McpServer): void {
   // ── Set full fingerprint spoof ──
   server.tool(
     "proxy_set_fingerprint_spoof",
-    "Enable outgoing TLS + HTTP/2 fingerprint spoofing via curl-impersonate in Docker. Supports browser presets that select a curl-impersonate target binary (BoringSSL + nghttp2, matching real Chrome/Firefox). Individual parameters override preset values.",
+    "Enable outgoing TLS + HTTP/2 fingerprint spoofing via curl-impersonate (requires Docker or Podman). Supports browser presets that select a curl-impersonate target binary (BoringSSL + nghttp2, matching real Chrome/Firefox). Individual parameters override preset values.",
     {
       preset: z.string().optional().describe("Browser preset name (e.g. 'chrome_131', 'chrome_136'). Use proxy_list_fingerprint_presets to see available options. Individual params below override preset values."),
       ja3: z.string().optional().describe("JA3 fingerprint string. Required if no preset is given."),

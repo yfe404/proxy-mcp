@@ -7,7 +7,7 @@ proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It 
 ### Boundaries
 
 - Only sees traffic **configured to route through it** (not a network tap or packet sniffer)
-- Spoofs **outgoing JA3 + HTTP/2 fingerprint + header order** (via curl-impersonate in Docker), not JA4 (JA4 is capture-only)
+- Spoofs **outgoing JA3 + HTTP/2 fingerprint + header order** (via curl-impersonate in Docker/Podman), not JA4 (JA4 is capture-only)
 - Can add, overwrite, or delete HTTP headers; outgoing header **order** can be controlled via fingerprint spoofing
 - Returns its own CA certificate — does **not** expose upstream server certificate chains
 
@@ -219,7 +219,7 @@ Note: imported HAR entries (and entries created by `proxy_replay_session`) do no
 ### Prerequisites
 
 - Node.js 22+
-- Docker (required for TLS fingerprint spoofing)
+- Docker or Podman (required for TLS fingerprint spoofing)
 
 ### Install & build
 
@@ -310,10 +310,10 @@ proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
 | `proxy_clear_ja3_spoof` | Disable fingerprint spoofing and stop curl-impersonate container |
 | `proxy_get_tls_config` | Return current TLS config (server capture, JA3 spoof state) |
 | `proxy_enable_server_tls_capture` | Toggle server-side JA3S capture (monkey-patches `tls.connect`) |
-| `proxy_set_fingerprint_spoof` | Enable full TLS + HTTP/2 fingerprint spoofing via curl-impersonate in Docker. Supports browser presets. |
+| `proxy_set_fingerprint_spoof` | Enable full TLS + HTTP/2 fingerprint spoofing via curl-impersonate in Docker/Podman. Supports browser presets. |
 | `proxy_list_fingerprint_presets` | List available browser fingerprint presets (e.g. `chrome_131`, `chrome_136`, `chrome_136_linux`, `firefox_133`) |
 
-Fingerprint spoofing works by re-issuing the request from the proxy via curl-impersonate running in a Docker container. curl-impersonate uses BoringSSL + nghttp2 (the same TLS and HTTP/2 libraries as Chrome), so TLS 1.3 and HTTP/2 fingerprints (SETTINGS, WINDOW_UPDATE, PRIORITY frames) match real browsers by construction. The origin server sees the proxy's spoofed TLS, HTTP/2, and header order — not the original client's. When a `user_agent` is set (including via presets), proxy-mcp also normalizes Chromium UA Client Hints headers (`sec-ch-ua*`) to match the spoofed User-Agent (forwarding contradictory hints is a common bot signal). Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup. `proxy_set_ja3_spoof` is kept for backward compatibility but custom JA3 strings are ignored (the preset's curl-impersonate target is used instead). JA4 fingerprints are captured (read-only) but spoofing is not supported.
+Fingerprint spoofing works by re-issuing the request from the proxy via curl-impersonate running in a Docker or Podman container. curl-impersonate uses BoringSSL + nghttp2 (the same TLS and HTTP/2 libraries as Chrome), so TLS 1.3 and HTTP/2 fingerprints (SETTINGS, WINDOW_UPDATE, PRIORITY frames) match real browsers by construction. The origin server sees the proxy's spoofed TLS, HTTP/2, and header order — not the original client's. When a `user_agent` is set (including via presets), proxy-mcp also normalizes Chromium UA Client Hints headers (`sec-ch-ua*`) to match the spoofed User-Agent (forwarding contradictory hints is a common bot signal). Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup. `proxy_set_ja3_spoof` is kept for backward compatibility but custom JA3 strings are ignored (the preset's curl-impersonate target is used instead). JA4 fingerprints are captured (read-only) but spoofing is not supported.
 
 ### Interceptors (18)
 
@@ -490,7 +490,7 @@ proxy_export_har --session_id SESSION_ID
 - **Traffic capture**: `on('request')` + `on('response')` events, correlated by request ID
 - **Ring buffer**: 1000 entries max, body previews capped at 4KB
 - **TLS capture**: Client JA3/JA4 from mockttp socket metadata; server JA3S via `tls.connect` monkey-patch
-- **TLS spoofing**: curl-impersonate in a Docker container (BoringSSL + nghttp2); container started lazily on first spoofed request
+- **TLS spoofing**: curl-impersonate in a Docker/Podman container (BoringSSL + nghttp2); container started lazily on first spoofed request
 - **Interceptors**: Managed by `InterceptorManager`, each type registers independently
 
 ## Testing
@@ -499,7 +499,7 @@ proxy_export_har --session_id SESSION_ID
 npm test              # All tests (unit + integration)
 npm run test:unit     # Unit tests only
 npm run test:integration  # Integration tests
-npm run test:e2e      # E2E fingerprint tests (requires Docker + Chrome + internet)
+npm run test:e2e      # E2E fingerprint tests (requires Docker or Podman + Chrome + internet)
 ```
 
 ## Credits
@@ -509,7 +509,7 @@ npm run test:e2e      # E2E fingerprint tests (requires Docker + Chrome + intern
 | Project | Role |
 |---------|------|
 | [mockttp](https://github.com/httptoolkit/mockttp) | MITM proxy engine, rule system, CA generation |
-| [curl-impersonate](https://github.com/lexiforest/curl-impersonate) | TLS/HTTP2 fingerprint spoofing via BoringSSL + nghttp2 in Docker |
+| [curl-impersonate](https://github.com/lexiforest/curl-impersonate) | TLS/HTTP2 fingerprint spoofing via BoringSSL + nghttp2 in Docker/Podman |
 | [frida-js](https://github.com/AeonLucid/frida-js) | Pure-JS Frida client for Android instrumentation |
 | [chrome-launcher](https://github.com/nicolo-ribaudo/chrome-launcher) | Chrome/Chromium process management |
 | [dockerode](https://github.com/apocas/dockerode) | Docker API client |
