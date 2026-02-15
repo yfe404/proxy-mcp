@@ -1,0 +1,10 @@
+FROM debian:bookworm-slim
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget && rm -rf /var/lib/apt/lists/*
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") && \
+    wget -qO /tmp/ci.tar.gz "https://github.com/lexiforest/curl-impersonate/releases/download/v1.4.4/curl-impersonate-v1.4.4.${ARCH}-linux-gnu.tar.gz" && \
+    mkdir -p /usr/local/lib/curl-impersonate && \
+    tar -xzf /tmp/ci.tar.gz -C /usr/local/lib/curl-impersonate/ && \
+    ln -s /usr/local/lib/curl-impersonate/curl-impersonate /usr/local/bin/curl-impersonate && \
+    rm /tmp/ci.tar.gz
+CMD ["sleep", "infinity"]

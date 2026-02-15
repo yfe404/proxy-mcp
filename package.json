@@ -13,12 +13,12 @@
     "dev": "tsc --watch",
     "test": "node --import tsx/esm --test 'test/unit/**/*.test.ts' 'test/integration/**/*.test.ts'",
     "test:unit": "node --import tsx/esm --test 'test/unit/**/*.test.ts'",
-    "test:integration": "node --import tsx/esm --test 'test/integration/**/*.test.ts'"
+    "test:integration": "node --import tsx/esm --test 'test/integration/**/*.test.ts'",
+    "test:e2e": "node --import tsx/esm --test 'test/e2e/**/*.test.ts'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
     "chrome-launcher": "^1.1.2",
-    "cycletls": "^2.0.5",
     "dockerode": "^4.0.4",
     "frida-js": "^0.4.0",
     "mockttp": "^3.17.0",

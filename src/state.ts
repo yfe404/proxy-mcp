@@ -14,7 +14,7 @@ import type { CompletedRequest, CompletedResponse, ProxyConfig } from "mockttp";
 import { randomUUID } from "node:crypto";
 import { serializeHeaders, capString } from "./utils.js";
 import { enableServerTlsCapture, type ServerTlsCapture } from "./tls-utils.js";
-import { spoofedRequest, shutdownCycleTLS, stripHopByHopHeaders } from "./tls-spoof.js";
+import { spoofedRequest, shutdownSpoofContainer, stripHopByHopHeaders } from "./tls-spoof.js";
 import { applyFingerprintHeaderOverrides } from "./spoof-headers.js";
 import { interceptorManager } from "./interceptors/manager.js";
 import { cleanupTempCerts } from "./interceptors/cert-utils.js";
@@ -411,7 +411,7 @@ export class ProxyManager {
     this.tlsMetadataCache.clear();
     this.disableServerTls();
     if (this._ja3SpoofConfig) {
-      await shutdownCycleTLS();
+      await shutdownSpoofContainer();
     }
   }
 
@@ -993,7 +993,7 @@ export class ProxyManager {
 
   async clearJa3Spoof(): Promise<void> {
     this._ja3SpoofConfig = null;
-    await shutdownCycleTLS();
+    await shutdownSpoofContainer();
     if (this._running) await this.rebuildMockttpRules();
   }
 
@@ -1072,7 +1072,7 @@ export class ProxyManager {
                 hostname.includes(p) || hostname.endsWith(p)
               );
               if (!matches) {
-                // Host doesn't match CycleTLS patterns — pass through without
+                // Host doesn't match spoof patterns — pass through without
                 // header modification.  Returning modified headers from beforeRequest
                 // changes how mockttp processes the upstream connection and can break
                 // TLS handshakes with strict servers (e.g. Akamai edge CDNs).
@@ -1083,8 +1083,7 @@ export class ProxyManager {
 
             try {
               // Extract cookies from the intercepted request's cookie header.
-              // This is used by CycleTLS to build a cookie jar and can improve
-              // parity vs raw Cookie header forwarding in some anti-bot setups.
+              // Forwarded to curl-impersonate for cookie jar parity.
               let cookies: { [key: string]: string } | undefined;
               const cookieHeader = (req.headers as Record<string, string>)["cookie"];
               if (cookieHeader) {
@@ -1113,6 +1112,7 @@ export class ProxyManager {
                 disableRedirect: spoofConfig.disableRedirect,
                 forceHTTP1: spoofConfig.forceHTTP1,
                 insecureSkipVerify: spoofConfig.insecureSkipVerify,
+                preset: spoofConfig.preset,
                 cookies,
               });
 
@@ -1121,7 +1121,7 @@ export class ProxyManager {
                   statusCode: result.status,
                   headers: result.headers,
                   // Use rawBody so mockttp doesn't auto content-encode based on Content-Encoding.
-                  // CycleTLS already returns the bytes as received from the origin.
+                  // curl-impersonate already returns the bytes as received from the origin.
                   rawBody: result.body,
                 },
               };

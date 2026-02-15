@@ -1,38 +1,73 @@
 /**
- * CycleTLS wrapper for JA3 fingerprint spoofing.
+ * curl-impersonate wrapper for TLS + HTTP/2 fingerprint spoofing.
  *
- * Spawns a Go subprocess (CycleTLS) that handles TLS with custom JA3 strings.
- * Lazy singleton: process starts on first spoofed request, reused across calls.
+ * Runs curl-impersonate inside a Docker container (debian:bookworm-slim based
+ * image with pre-installed binaries from the lexiforest/curl-impersonate fork).
+ * The container uses host networking and stays alive via `sleep infinity` so
+ * requests are issued via `docker exec`.
+ *
+ * Replaces the former CycleTLS backend — curl-impersonate uses BoringSSL +
+ * nghttp2 (same libs as Chrome), so TLS 1.3 and HTTP/2 fingerprints match
+ * real browsers by construction.
  */
 
-import type { CycleTLSClient, CycleTLSRequestOptions } from "cycletls";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import Docker from "dockerode";
+import { resolveBrowserPreset } from "./browser-presets.js";
 
-let instance: CycleTLSClient | null = null;
-let initPromise: Promise<CycleTLSClient> | null = null;
+const execFileAsync = promisify(execFile);
+
+// Detect container runtime: prefer docker, fall back to podman.
+let _containerCli: string | null = null;
+async function containerCli(): Promise<string> {
+  if (_containerCli) return _containerCli;
+  for (const bin of ["docker", "podman"]) {
+    try {
+      await execFileAsync(bin, ["--version"], { timeout: 5_000 });
+      _containerCli = bin;
+      return bin;
+    } catch { /* not found or not working — try next */ }
+  }
+  throw new Error("Neither docker nor podman found on PATH");
+}
 
 /**
- * Get or create the CycleTLS singleton.
+ * Create a dockerode instance, auto-detecting the container socket.
+ * Checks DOCKER_HOST first, then the default docker socket, then
+ * the podman user socket.
  */
-async function getCycleTLS(): Promise<CycleTLSClient> {
-  if (instance) return instance;
+function createDockerClient(): InstanceType<typeof Docker> {
+  if (process.env.DOCKER_HOST) return new Docker();
 
-  if (!initPromise) {
-    initPromise = (async () => {
-      // Dynamic import to handle CJS → ESM interop
-      const mod = await import("cycletls");
-      const init = mod.default ?? mod;
-      const client: CycleTLSClient = await (init as unknown as (opts?: Record<string, unknown>) => Promise<CycleTLSClient>)();
-      instance = client;
-      return client;
-    })();
+  const defaultSocket = "/var/run/docker.sock";
+  if (fs.existsSync(defaultSocket)) return new Docker({ socketPath: defaultSocket });
+
+  const uid = process.getuid?.();
+  if (uid !== undefined) {
+    const podmanSocket = `/run/user/${uid}/podman/podman.sock`;
+    if (fs.existsSync(podmanSocket)) return new Docker({ socketPath: podmanSocket });
   }
 
-  return initPromise;
+  // Last resort — let dockerode try its default
+  return new Docker();
 }
+
+const IMAGE_NAME = "proxy-mcp-curl-impersonate";
+const CONTAINER_NAME = "proxy-mcp-curl-impersonate";
+const DEFAULT_CURL_BINARY = "chrome131";
+
+let containerId: string | null = null;
+let initPromise: Promise<string> | null = null;
+
+// ── Public types ──
 
 export interface SpoofedResponse {
   status: number;
-  headers: Record<string, string>;
+  headers: Record<string, string | string[]>;
   body: Buffer;
 }
 
@@ -40,10 +75,10 @@ export interface SpoofOptions {
   method: string;
   headers?: Record<string, string>;
   body?: string;
-  ja3: string;
+  ja3: string;              // kept for backward compat (ignored by curl-impersonate)
   userAgent?: string;
   proxy?: string;
-  http2Fingerprint?: string;
+  http2Fingerprint?: string; // kept for backward compat (ignored by curl-impersonate)
   headerOrder?: string[];
   orderAsProvided?: boolean;
   disableGrease?: boolean;
@@ -51,7 +86,128 @@ export interface SpoofOptions {
   forceHTTP1?: boolean;
   insecureSkipVerify?: boolean;
   cookies?: Array<object> | { [key: string]: string };
+  preset?: string;          // browser preset name → selects curlBinary
 }
+
+// ── Container lifecycle ──
+
+function getProjectRoot(): string {
+  const thisFile = fileURLToPath(import.meta.url);
+  // Works from both src/ (dev) and dist/ (built)
+  return path.resolve(path.dirname(thisFile), "..");
+}
+
+/**
+ * Build the curl-impersonate Docker image if not present,
+ * start the container if not running. Returns the container ID.
+ */
+async function ensureSpoofContainer(): Promise<string> {
+  if (containerId) return containerId;
+
+  if (!initPromise) {
+    initPromise = (async () => {
+      const docker = createDockerClient();
+
+      // Check if container already exists and is running
+      try {
+        const existing = docker.getContainer(CONTAINER_NAME);
+        const info = await existing.inspect();
+        if (info.State.Running) {
+          containerId = info.Id;
+          return containerId;
+        }
+        // Exists but not running — start it
+        await existing.start();
+        containerId = info.Id;
+        return containerId;
+      } catch {
+        // Container doesn't exist — continue to build + create
+      }
+
+      // Build image if not present
+      try {
+        await docker.getImage(IMAGE_NAME).inspect();
+      } catch {
+        const projectRoot = getProjectRoot();
+        const dockerfilePath = path.join(projectRoot, "Dockerfile.curl-impersonate");
+
+        // Use execFile to build (simpler than dockerode tar stream)
+        const cli = await containerCli();
+        await execFileAsync(cli, [
+          "build",
+          "-f", dockerfilePath,
+          "-t", IMAGE_NAME,
+          projectRoot,
+        ], { timeout: 300_000 });
+      }
+
+      // Create and start container
+      const container = await docker.createContainer({
+        Image: IMAGE_NAME,
+        name: CONTAINER_NAME,
+        Cmd: ["sleep", "infinity"],
+        HostConfig: { NetworkMode: "host" },
+      });
+      await container.start();
+      const info = await container.inspect();
+      containerId = info.Id;
+      return containerId;
+    })();
+  }
+
+  return initPromise;
+}
+
+// ── Response parsing ──
+
+/**
+ * Parse HTTP response headers from curl's `-D /dev/stderr` output.
+ * Handles multiple response blocks (redirects, 1xx informational) by
+ * using the LAST block.
+ */
+function parseResponseHeaders(headerBuf: Buffer): { status: number; headers: Record<string, string | string[]> } {
+  const text = headerBuf.toString("utf-8");
+  // Split into response blocks (each starts with HTTP/...)
+  const blocks = text.split(/(?=^HTTP\/)/m).filter((b) => b.trim().length > 0);
+  const lastBlock = blocks[blocks.length - 1] || "";
+  const lines = lastBlock.split(/\r?\n/);
+
+  let status = 200;
+  const headers: Record<string, string | string[]> = {};
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (i === 0) {
+      // Status line: "HTTP/2 200" or "HTTP/1.1 200 OK"
+      const match = line.match(/^HTTP\/[\d.]+\s+(\d+)/);
+      if (match) status = parseInt(match[1], 10);
+      continue;
+    }
+    const colonIdx = line.indexOf(":");
+    if (colonIdx > 0) {
+      const key = line.slice(0, colonIdx).trim().toLowerCase();
+      const value = line.slice(colonIdx + 1).trim();
+      // Set-Cookie must be kept as an array — combining with commas
+      // breaks cookie parsing (commas appear in Expires values).
+      if (key === "set-cookie") {
+        const existing = headers[key];
+        if (Array.isArray(existing)) {
+          existing.push(value);
+        } else if (typeof existing === "string") {
+          headers[key] = [existing, value];
+        } else {
+          headers[key] = [value];
+        }
+      } else {
+        headers[key] = value;
+      }
+    }
+  }
+
+  return { status, headers };
+}
+
+// ── Utilities (kept from original — still needed) ──
 
 /** @internal */
 export function responseDataToBuffer(data: unknown): Buffer {
@@ -147,69 +303,149 @@ export function reorderHeaders(
   return result;
 }
 
+// ── Main request function ──
+
 /**
- * Make an HTTP request with a spoofed JA3 fingerprint via CycleTLS.
+ * Make an HTTP request with a spoofed TLS + HTTP/2 fingerprint via
+ * curl-impersonate running in a Docker container.
  */
 export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<SpoofedResponse> {
-  const cycle = await getCycleTLS();
+  const cid = await ensureSpoofContainer();
 
-  // Compatibility-first: send headers exactly as received from mockttp and let
-  // CycleTLS apply headerOrder/orderAsProvided if configured.
-  const headers = opts.headers || {};
-
-  const requestOpts: CycleTLSRequestOptions = {
-    ja3: opts.ja3,
-    userAgent: opts.userAgent || getHeader(headers, "user-agent") || "",
-    headers,
-    body: opts.body || "",
-    proxy: opts.proxy || "",
-  };
-
-  // Conditionally include new CycleTLS fields (only when defined)
-  if (opts.http2Fingerprint !== undefined) requestOpts.http2Fingerprint = opts.http2Fingerprint;
-  if (opts.headerOrder !== undefined) requestOpts.headerOrder = opts.headerOrder;
-  if (opts.orderAsProvided !== undefined) requestOpts.orderAsProvided = opts.orderAsProvided;
-  if (opts.disableGrease !== undefined) requestOpts.disableGrease = opts.disableGrease;
-  if (opts.disableRedirect !== undefined) requestOpts.disableRedirect = opts.disableRedirect;
-  if (opts.forceHTTP1 !== undefined) requestOpts.forceHTTP1 = opts.forceHTTP1;
-  if (opts.insecureSkipVerify !== undefined) requestOpts.insecureSkipVerify = opts.insecureSkipVerify;
-  if (opts.cookies !== undefined) requestOpts.cookies = opts.cookies;
-
-  const response = await cycle(url, requestOpts, opts.method.toLowerCase() as "get" | "post" | "put" | "delete" | "patch" | "head" | "options");
-
-  // CycleTLS returns headers as Record<string, any>
-  const responseHeaders: Record<string, string> = {};
-  if (response.headers) {
-    for (const [k, v] of Object.entries(response.headers)) {
-      responseHeaders[k.toLowerCase()] = String(v);
+  // Determine which curl-impersonate target to use
+  let curlTarget = DEFAULT_CURL_BINARY;
+  if (opts.preset) {
+    try {
+      const preset = resolveBrowserPreset(opts.preset);
+      curlTarget = preset.curlBinary;
+    } catch {
+      // Fall through to default
     }
   }
 
-  const body = Buffer.from(await response.arrayBuffer());
+  // Build the container exec command
+  const cli = await containerCli();
+  const args: string[] = [
+    "exec", cid,
+    "curl-impersonate",
+    "--impersonate", curlTarget,
+    "-s",                    // silent (no progress)
+    "-D", "/dev/stderr",     // response headers → stderr
+    "--compressed",          // handle content-encoding
+  ];
 
-  // Let mockttp compute length/transfer encoding after any automatic
-  // Content-Encoding transformation.
+  // Timeouts — fail fast on unreachable hosts instead of blocking
+  // for the full docker exec timeout. These don't alter the TLS fingerprint.
+  args.push("--connect-timeout", "15");
+  args.push("--max-time", "45");
+
+  // Cookies — forward via -b for explicit cookie jar behavior.
+  // Cookies also flow via -H "cookie: ..." from opts.headers; when -b is used
+  // the cookie header is stripped from -H to avoid duplication.
+  const hasCookies =
+    opts.cookies && typeof opts.cookies === "object" && !Array.isArray(opts.cookies);
+  if (hasCookies) {
+    const cookieStr = Object.entries(opts.cookies as Record<string, string>)
+      .map(([k, v]) => `${k}=${v}`)
+      .join("; ");
+    if (cookieStr) {
+      args.push("-b", cookieStr);
+    }
+  }
+
+  // Headers
+  const headers = opts.headers || {};
+  for (const [k, v] of Object.entries(headers)) {
+    // Skip cookie header when using -b flag (avoid duplication)
+    if (k.toLowerCase() === "cookie" && hasCookies) continue;
+    args.push("-H", `${k}: ${v}`);
+  }
+
+  // User-Agent override (if set, override the impersonation default)
+  if (opts.userAgent) {
+    args.push("-H", `user-agent: ${opts.userAgent}`);
+  }
+
+  // Method
+  const method = opts.method.toUpperCase();
+  if (method !== "GET") {
+    args.push("-X", method);
+  }
+
+  // Body
+  if (opts.body) {
+    args.push("--data-raw", opts.body);
+  }
+
+  // Proxy
+  if (opts.proxy) {
+    args.push("--proxy", opts.proxy);
+  }
+
+  // Redirects
+  if (!opts.disableRedirect) {
+    args.push("-L");           // follow redirects
+    args.push("--max-redirs", "10");
+  }
+
+  // TLS verification
+  if (opts.insecureSkipVerify) {
+    args.push("-k");
+  }
+
+  // Force HTTP/1.1
+  if (opts.forceHTTP1) {
+    args.push("--http1.1");
+  }
+
+  // URL must be last
+  args.push(url);
+
+  const { stdout, stderr } = await execFileAsync(cli, args, {
+    maxBuffer: 50 * 1024 * 1024,
+    encoding: "buffer",
+    timeout: 60_000,  // curl's own --max-time handles the actual limit
+  });
+
+  // Parse response headers from stderr
+  const { status, headers: responseHeaders } = parseResponseHeaders(stderr);
+
+  // curl-impersonate with --compressed decompresses the body but keeps the
+  // original content-encoding/content-length headers. Strip them so the
+  // client doesn't try to decompress already-decompressed data.
   delete responseHeaders["content-length"];
   delete responseHeaders["transfer-encoding"];
+  delete responseHeaders["content-encoding"];
 
   return {
-    status: response.status,
+    status,
     headers: responseHeaders,
-    body,
+    body: stdout,
   };
 }
 
+// ── Shutdown ──
+
 /**
- * Shut down the CycleTLS subprocess. Called when spoofing is disabled or proxy stops.
+ * Stop and remove the curl-impersonate Docker container.
+ * Called when spoofing is disabled or proxy stops.
  */
-export async function shutdownCycleTLS(): Promise<void> {
-  if (instance) {
+export async function shutdownSpoofContainer(): Promise<void> {
+  if (containerId) {
     try {
-      await instance.exit();
+      const docker = createDockerClient();
+      const container = docker.getContainer(containerId);
+      try { await container.stop({ t: 2 }); } catch { /* may already be stopped */ }
+      try { await container.remove({ force: true }); } catch { /* may already be removed */ }
     } catch {
       // Ignore shutdown errors
     }
-    instance = null;
+    containerId = null;
     initPromise = null;
   }
 }
+
+/**
+ * @deprecated Use shutdownSpoofContainer(). Kept for backward compat during transition.
+ */
+export const shutdownCycleTLS = shutdownSpoofContainer;
