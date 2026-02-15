@@ -142,17 +142,16 @@ describe("E2E Fingerprint Spoofing", () => {
 
   // ── Test 1: Barnes & Noble ──
 
-  it("Barnes & Noble loads with spoofed fingerprint", { timeout: 90_000, todo: "Requires B&N Fastly CDN to be reachable from test environment" }, async () => {
+  it("Barnes & Noble loads with spoofed fingerprint", { timeout: 120_000, todo: "Requires B&N Akamai challenge to be solvable through proxy" }, async () => {
     // Navigate to about:blank first to clear previous page state
     await cdpSession.send("Page.navigate", { url: "about:blank" }, { timeoutMs: 5_000 }).catch(() => {});
     await sleep(500);
 
-    // Fire navigate — don't block on CDP response (page loads many sub-resources
-    // through Docker exec curl-impersonate which can be slow)
+    // Step 1: Initial navigation — Akamai may return 403 with sensor JS challenge.
+    // The sensor script runs in Chrome, POSTs validation data, and solves the _abck cookie.
     cdpSession.send("Page.navigate", { url: "https://www.barnesandnoble.com/" }, { timeoutMs: 60_000 }).catch(() => {});
 
-    // Poll traffic until we see B&N traffic (up to 60s)
-    // proxy_list_traffic returns summaries: { id, url, hostname, status, ... }
+    // Poll until we see B&N traffic with a response
     let exchanges: Array<Record<string, unknown>> = [];
     for (let i = 0; i < 30; i++) {
       await sleep(2_000);
@@ -163,16 +162,49 @@ describe("E2E Fingerprint Spoofing", () => {
         }) as { content: Array<{ text: string }> },
       );
       exchanges = (trafficRes.exchanges ?? []) as Array<Record<string, unknown>>;
-      if (exchanges.length > 0) break;
+      if (exchanges.some((e) => typeof e.status === "number")) break;
     }
 
     assert.ok(exchanges.length > 0, "No traffic captured for barnesandnoble.com");
 
-    // Find the main document request (one with a status code)
-    const mainDoc = exchanges.find((e) => typeof e.status === "number");
-    assert.ok(mainDoc, "No completed main document exchange found");
-    const status = mainDoc.status as number;
-    assert.ok(status >= 200 && status < 400, `Expected 2xx/3xx status, got ${status}`);
+    // Check if the first response was 403 (Akamai challenge)
+    const firstDoc = exchanges.find((e) => typeof e.status === "number");
+    assert.ok(firstDoc, "No completed exchange found");
+    const firstStatus = firstDoc.status as number;
+
+    if (firstStatus === 403) {
+      // Akamai challenge: wait for sensor JS to execute and solve the _abck cookie,
+      // then retry navigation.
+      await sleep(15_000); // Sensor script needs time to run + POST validation
+
+      // Clear traffic for clean retry observation
+      await client.callTool({ name: "proxy_clear_traffic", arguments: {} });
+
+      // Step 2: Retry navigation — Chrome should now have a solved _abck cookie
+      cdpSession.send("Page.navigate", { url: "https://www.barnesandnoble.com/" }, { timeoutMs: 60_000 }).catch(() => {});
+
+      let retryExchanges: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 30; i++) {
+        await sleep(2_000);
+        const trafficRes = parseToolResult(
+          await client.callTool({
+            name: "proxy_list_traffic",
+            arguments: { limit: 100, hostname_filter: "barnesandnoble" },
+          }) as { content: Array<{ text: string }> },
+        );
+        retryExchanges = (trafficRes.exchanges ?? []) as Array<Record<string, unknown>>;
+        if (retryExchanges.some((e) => typeof e.status === "number")) break;
+      }
+
+      assert.ok(retryExchanges.length > 0, "No traffic on retry after Akamai challenge");
+      const retryDoc = retryExchanges.find((e) => typeof e.status === "number");
+      assert.ok(retryDoc, "No completed retry exchange found");
+      const retryStatus = retryDoc.status as number;
+      assert.ok(retryStatus >= 200 && retryStatus < 400, `Retry got ${retryStatus}, expected 2xx/3xx (Akamai challenge may not be solvable through proxy)`);
+    } else {
+      // Direct success — no Akamai challenge
+      assert.ok(firstStatus >= 200 && firstStatus < 400, `Expected 2xx/3xx status, got ${firstStatus}`);
+    }
 
     // Verify page title doesn't indicate blocking
     const evalResult = await cdpSession.send("Runtime.evaluate", {
@@ -186,7 +218,7 @@ describe("E2E Fingerprint Spoofing", () => {
 
   // ── Test 2: Reddit ──
 
-  it("Reddit loads without 403", { timeout: 90_000, todo: "Remove todo once curl-impersonate fix is verified" }, async () => {
+  it("Reddit loads without 403", { timeout: 90_000 }, async () => {
     // Clear traffic from previous test
     await client.callTool({ name: "proxy_clear_traffic", arguments: {} });
 
@@ -250,7 +282,7 @@ describe("E2E Fingerprint Spoofing", () => {
 
   // ── Test 4: TLS 1.3 negotiation ──
 
-  it("TLS 1.3 is negotiated (JA4 contains t13)", { timeout: 10_000, todo: "Remove todo once curl-impersonate TLS 1.3 is verified" }, async () => {
+  it("TLS 1.3 is negotiated (JA4 contains t13)", { timeout: 10_000 }, async () => {
     assert.ok(browserleaksData, "browserleaks data not available (test 3 must pass first)");
 
     // Look for JA4 fingerprint containing t13 (TLS 1.3 indicator)

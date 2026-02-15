@@ -31,7 +31,7 @@ let initPromise: Promise<string> | null = null;
 
 export interface SpoofedResponse {
   status: number;
-  headers: Record<string, string>;
+  headers: Record<string, string | string[]>;
   body: Buffer;
 }
 
@@ -128,7 +128,7 @@ async function ensureSpoofContainer(): Promise<string> {
  * Handles multiple response blocks (redirects, 1xx informational) by
  * using the LAST block.
  */
-function parseResponseHeaders(headerBuf: Buffer): { status: number; headers: Record<string, string> } {
+function parseResponseHeaders(headerBuf: Buffer): { status: number; headers: Record<string, string | string[]> } {
   const text = headerBuf.toString("utf-8");
   // Split into response blocks (each starts with HTTP/...)
   const blocks = text.split(/(?=^HTTP\/)/m).filter((b) => b.trim().length > 0);
@@ -136,7 +136,7 @@ function parseResponseHeaders(headerBuf: Buffer): { status: number; headers: Rec
   const lines = lastBlock.split(/\r?\n/);
 
   let status = 200;
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string | string[]> = {};
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -150,7 +150,20 @@ function parseResponseHeaders(headerBuf: Buffer): { status: number; headers: Rec
     if (colonIdx > 0) {
       const key = line.slice(0, colonIdx).trim().toLowerCase();
       const value = line.slice(colonIdx + 1).trim();
-      headers[key] = value;
+      // Set-Cookie must be kept as an array — combining with commas
+      // breaks cookie parsing (commas appear in Expires values).
+      if (key === "set-cookie") {
+        const existing = headers[key];
+        if (Array.isArray(existing)) {
+          existing.push(value);
+        } else if (typeof existing === "string") {
+          headers[key] = [existing, value];
+        } else {
+          headers[key] = [value];
+        }
+      } else {
+        headers[key] = value;
+      }
     }
   }
 
