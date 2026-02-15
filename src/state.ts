@@ -14,7 +14,8 @@ import type { CompletedRequest, CompletedResponse, ProxyConfig } from "mockttp";
 import { randomUUID } from "node:crypto";
 import { serializeHeaders, capString } from "./utils.js";
 import { enableServerTlsCapture, type ServerTlsCapture } from "./tls-utils.js";
-import { spoofedRequest, shutdownCycleTLS } from "./tls-spoof.js";
+import { spoofedRequest, shutdownCycleTLS, stripHopByHopHeaders } from "./tls-spoof.js";
+import { applyFingerprintHeaderOverrides } from "./spoof-headers.js";
 import { interceptorManager } from "./interceptors/manager.js";
 import { cleanupTempCerts } from "./interceptors/cert-utils.js";
 import { ensureSafeNetworkInterfaces } from "./os-shim.js";
@@ -236,11 +237,22 @@ export interface TlsServerMetadata {
   ja3sFingerprint?: string;
 }
 
-export interface Ja3SpoofConfig {
+export interface FingerprintSpoofConfig {
   ja3: string;
   userAgent?: string;
   hostPatterns?: string[];
+  http2Fingerprint?: string;
+  headerOrder?: string[];
+  orderAsProvided?: boolean;
+  disableGrease?: boolean;
+  disableRedirect?: boolean;
+  forceHTTP1?: boolean;
+  insecureSkipVerify?: boolean;
+  preset?: string;
 }
+
+/** @deprecated Use FingerprintSpoofConfig */
+export type Ja3SpoofConfig = FingerprintSpoofConfig;
 
 export interface ProxyStartOptions extends SessionStartOptions {
   persistenceEnabled?: boolean;
@@ -343,7 +355,7 @@ export class ProxyManager {
   // TLS fingerprinting
   private tlsMetadataCache = new Map<string, TlsClientMetadata>();
   private serverTlsCapture: ServerTlsCapture | null = null;
-  private _ja3SpoofConfig: Ja3SpoofConfig | null = null;
+  private _ja3SpoofConfig: FingerprintSpoofConfig | null = null;
 
   // ── Lifecycle ──
 
@@ -966,13 +978,17 @@ export class ProxyManager {
 
   // ── TLS Fingerprinting ──
 
-  getJa3SpoofConfig(): Ja3SpoofConfig | null {
+  getJa3SpoofConfig(): FingerprintSpoofConfig | null {
     return this._ja3SpoofConfig;
   }
 
-  async setJa3Spoof(config: Ja3SpoofConfig): Promise<void> {
+  async setFingerprintSpoof(config: FingerprintSpoofConfig): Promise<void> {
     this._ja3SpoofConfig = config;
     if (this._running) await this.rebuildMockttpRules();
+  }
+
+  async setJa3Spoof(config: FingerprintSpoofConfig): Promise<void> {
+    return this.setFingerprintSpoof(config);
   }
 
   async clearJa3Spoof(): Promise<void> {
@@ -1047,27 +1063,66 @@ export class ProxyManager {
             if (!req.url.startsWith("https://")) return {};
 
             if (spoofConfig.hostPatterns && spoofConfig.hostPatterns.length > 0) {
-              const hostname = req.hostname || "";
+              // req.hostname can be empty in HTTPS proxy mode; fall back to URL parsing
+              let hostname = req.hostname || "";
+              if (!hostname) {
+                try { hostname = new URL(req.url).hostname; } catch { /* ignore */ }
+              }
               const matches = spoofConfig.hostPatterns.some((p) =>
                 hostname.includes(p) || hostname.endsWith(p)
               );
-              if (!matches) return {};
+              if (!matches) {
+                // Host doesn't match CycleTLS patterns — pass through without
+                // header modification.  Returning modified headers from beforeRequest
+                // changes how mockttp processes the upstream connection and can break
+                // TLS handshakes with strict servers (e.g. Akamai edge CDNs).
+                // The browser's --user-agent flag already ensures a consistent UA.
+                return {};
+              }
             }
 
             try {
+              // Extract cookies from the intercepted request's cookie header.
+              // This is used by CycleTLS to build a cookie jar and can improve
+              // parity vs raw Cookie header forwarding in some anti-bot setups.
+              let cookies: { [key: string]: string } | undefined;
+              const cookieHeader = (req.headers as Record<string, string>)["cookie"];
+              if (cookieHeader) {
+                cookies = {};
+                for (const pair of cookieHeader.split(";")) {
+                  const eq = pair.indexOf("=");
+                  if (eq > 0) {
+                    cookies[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+                  }
+                }
+              }
+
               const result = await spoofedRequest(req.url, {
                 method: req.method,
-                headers: req.headers as Record<string, string>,
+                headers: applyFingerprintHeaderOverrides(
+                  stripHopByHopHeaders(req.headers as Record<string, string>),
+                  { userAgent: spoofConfig.userAgent },
+                ),
                 body: req.body.buffer.length > 0 ? req.body.buffer.toString("utf-8") : undefined,
                 ja3: spoofConfig.ja3,
                 userAgent: spoofConfig.userAgent,
+                http2Fingerprint: spoofConfig.http2Fingerprint,
+                headerOrder: spoofConfig.headerOrder,
+                orderAsProvided: spoofConfig.orderAsProvided,
+                disableGrease: spoofConfig.disableGrease,
+                disableRedirect: spoofConfig.disableRedirect,
+                forceHTTP1: spoofConfig.forceHTTP1,
+                insecureSkipVerify: spoofConfig.insecureSkipVerify,
+                cookies,
               });
 
               return {
                 response: {
                   statusCode: result.status,
                   headers: result.headers,
-                  body: result.body,
+                  // Use rawBody so mockttp doesn't auto content-encode based on Content-Encoding.
+                  // CycleTLS already returns the bytes as received from the origin.
+                  rawBody: result.body,
                 },
               };
             } catch {

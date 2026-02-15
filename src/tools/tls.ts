@@ -5,7 +5,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { proxyManager } from "../state.js";
+import type { FingerprintSpoofConfig } from "../state.js";
 import { truncateResult } from "../utils.js";
+import { resolveBrowserPreset, listBrowserPresets } from "../browser-presets.js";
 
 export function registerTlsTools(server: McpServer): void {
   // ── Get TLS fingerprints for a specific exchange ──
@@ -105,7 +107,7 @@ export function registerTlsTools(server: McpServer): void {
     },
   );
 
-  // ── Set JA3 spoof ──
+  // ── Set JA3 spoof (legacy — kept for backward compat) ──
   server.tool(
     "proxy_set_ja3_spoof",
     "Enable outgoing JA3 fingerprint spoofing via CycleTLS. HTTPS requests matching host patterns will be re-issued with the specified JA3 string.",
@@ -135,6 +137,97 @@ export function registerTlsTools(server: McpServer): void {
       } catch (e) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", error: String(e) }) }] };
       }
+    },
+  );
+
+  // ── Set full fingerprint spoof ──
+  server.tool(
+    "proxy_set_fingerprint_spoof",
+    "Enable outgoing JA3 + HTTP/2 fingerprint spoofing via CycleTLS. Supports browser presets, HTTP/2 SETTINGS/PRIORITY frame fingerprints, header ordering, and more. Individual parameters override preset values.",
+    {
+      preset: z.string().optional().describe("Browser preset name (e.g. 'chrome_131', 'chrome_136'). Use proxy_list_fingerprint_presets to see available options. Individual params below override preset values."),
+      ja3: z.string().optional().describe("JA3 fingerprint string. Required if no preset is given."),
+      user_agent: z.string().optional().describe("User-Agent header to use with spoofed requests"),
+      host_patterns: z.array(z.string()).optional().describe("Only spoof requests to hostnames containing these substrings. Empty = spoof all HTTPS."),
+      http2_fingerprint: z.string().optional().describe("HTTP/2 fingerprint (SETTINGS|WINDOW_UPDATE|PRIORITY frames). E.g. '1:65536;2:0;3:1000;4:6291456;6:262144|15663105|0:1:256:0,...'"),
+      header_order: z.array(z.string()).optional().describe("Header order for outgoing requests (e.g. ['host','user-agent','accept',...])"),
+      order_as_provided: z.boolean().optional().describe("Send headers in the exact order provided (default: true when header_order is set)"),
+      disable_grease: z.boolean().optional().describe("Disable GREASE values in TLS ClientHello"),
+      disable_redirect: z.boolean().optional().describe("Disable automatic redirect following"),
+      force_http1: z.boolean().optional().describe("Force HTTP/1.1 instead of HTTP/2"),
+      insecure_skip_verify: z.boolean().optional().describe("Skip TLS certificate verification"),
+    },
+    async ({ preset, ja3, user_agent, host_patterns, http2_fingerprint, header_order, order_as_provided, disable_grease, disable_redirect, force_http1, insecure_skip_verify }) => {
+      try {
+        // Resolve preset as base, then apply explicit overrides
+        let config: FingerprintSpoofConfig;
+
+        if (preset) {
+          const base = resolveBrowserPreset(preset);
+          config = {
+            ja3: ja3 ?? base.ja3,
+            userAgent: user_agent ?? base.userAgent,
+            hostPatterns: host_patterns,
+            http2Fingerprint: http2_fingerprint ?? base.http2Fingerprint,
+            headerOrder: header_order ?? base.headerOrder,
+            orderAsProvided: order_as_provided ?? base.orderAsProvided,
+            disableGrease: disable_grease,
+            disableRedirect: disable_redirect,
+            forceHTTP1: force_http1,
+            insecureSkipVerify: insecure_skip_verify,
+            preset,
+          };
+        } else {
+          if (!ja3) {
+            return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", error: "Either 'preset' or 'ja3' is required" }) }] };
+          }
+          config = {
+            ja3,
+            userAgent: user_agent,
+            hostPatterns: host_patterns,
+            http2Fingerprint: http2_fingerprint,
+            headerOrder: header_order,
+            orderAsProvided: order_as_provided ?? (header_order ? true : undefined),
+            disableGrease: disable_grease,
+            disableRedirect: disable_redirect,
+            forceHTTP1: force_http1,
+            insecureSkipVerify: insecure_skip_verify,
+          };
+        }
+
+        await proxyManager.setFingerprintSpoof(config);
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              status: "success",
+              message: "Fingerprint spoofing enabled",
+              config,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", error: String(e) }) }] };
+      }
+    },
+  );
+
+  // ── List fingerprint presets ──
+  server.tool(
+    "proxy_list_fingerprint_presets",
+    "List available browser fingerprint presets for use with proxy_set_fingerprint_spoof.",
+    {},
+    async () => {
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            status: "success",
+            presets: listBrowserPresets(),
+          }),
+        }],
+      };
     },
   );
 

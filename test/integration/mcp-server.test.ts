@@ -54,7 +54,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 73 tools", async () => {
+  it("lists all 75 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -117,7 +117,10 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_import_har"));
     assert.ok(names.includes("proxy_replay_session"));
     assert.ok(names.includes("proxy_get_session_handshakes"));
-    assert.equal(names.length, 73);
+    // Fingerprint spoofing tools
+    assert.ok(names.includes("proxy_set_fingerprint_spoof"));
+    assert.ok(names.includes("proxy_list_fingerprint_presets"));
+    assert.equal(names.length, 75);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {
