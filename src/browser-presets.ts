@@ -1,20 +1,21 @@
 /**
- * Browser fingerprint presets for CycleTLS.
+ * Browser fingerprint presets for curl-impersonate.
  *
- * Each preset bundles a JA3, HTTP/2 fingerprint, User-Agent, and header order
- * that approximate a specific browser version. These are point-in-time snapshots
- * and should be updated periodically — Chrome fingerprints vary by version,
- * platform, and field trials.
+ * Each preset bundles a JA3, HTTP/2 fingerprint, User-Agent, header order,
+ * and a curlBinary name that selects the curl-impersonate impersonation target.
+ * These are point-in-time snapshots and should be updated periodically —
+ * Chrome fingerprints vary by version, platform, and field trials.
  */
 
 export interface BrowserPreset {
   name: string;
   description: string;
-  ja3: string;
+  ja3: string;              // kept for documentation/verification
   userAgent: string;
-  http2Fingerprint: string;
+  http2Fingerprint: string; // kept for documentation/verification
   headerOrder: string[];
   orderAsProvided: boolean;
+  curlBinary: string;       // curl-impersonate target, e.g. "chrome131"
 }
 
 // HTTP/2 fingerprint format for CycleTLS (4 pipe-separated parts):
@@ -29,6 +30,7 @@ const PRESETS: Record<string, BrowserPreset> = {
     ja3: "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0",
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     http2Fingerprint: "1:65536;2:0;3:1000;4:6291456;6:262144|15663105|0:1:256:0,3:0:0:200,5:0:0:168,7:0:0:168,9:0:0:168,11:0:0:168,13:0:0:240|m,a,s,p",
+    curlBinary: "chrome131",
     headerOrder: [
       "host",
       "connection",
@@ -57,6 +59,7 @@ const PRESETS: Record<string, BrowserPreset> = {
     ja3: "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0",
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
     http2Fingerprint: "1:65536;2:0;3:1000;4:6291456;6:262144|15663105|0:1:256:0,3:0:0:200,5:0:0:168,7:0:0:168,9:0:0:168,11:0:0:168,13:0:0:240|m,a,s,p",
+    curlBinary: "chrome136",
     headerOrder: [
       "host",
       "connection",
@@ -85,6 +88,7 @@ const PRESETS: Record<string, BrowserPreset> = {
     ja3: "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0",
     userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
     http2Fingerprint: "1:65536;2:0;3:1000;4:6291456;6:262144|15663105|0:1:256:0,3:0:0:200,5:0:0:168,7:0:0:168,9:0:0:168,11:0:0:168,13:0:0:240|m,a,s,p",
+    curlBinary: "chrome136",
     headerOrder: [
       "host",
       "connection",
@@ -113,6 +117,7 @@ const PRESETS: Record<string, BrowserPreset> = {
     ja3: "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-34-51-45-43-13-21,29-23-24-25-256-257,0",
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
     http2Fingerprint: "1:65536;4:131072;5:16384|12517377|0|m,s,a,p",
+    curlBinary: "firefox133",
     headerOrder: [
       "host",
       "user-agent",

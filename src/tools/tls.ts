@@ -110,9 +110,9 @@ export function registerTlsTools(server: McpServer): void {
   // ── Set JA3 spoof (legacy — kept for backward compat) ──
   server.tool(
     "proxy_set_ja3_spoof",
-    "Enable outgoing JA3 fingerprint spoofing via CycleTLS. HTTPS requests matching host patterns will be re-issued with the specified JA3 string.",
+    "Legacy: enable JA3 spoofing (deprecated, use proxy_set_fingerprint_spoof). Custom JA3 strings are ignored by the curl-impersonate backend; the request will use the default Chrome preset.",
     {
-      ja3: z.string().describe("JA3 fingerprint string to spoof (e.g., '771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-21,29-23-24,0')"),
+      ja3: z.string().describe("JA3 fingerprint string (ignored by curl-impersonate backend — use proxy_set_fingerprint_spoof with a preset instead)"),
       user_agent: z.string().optional().describe("User-Agent header to use with spoofed requests"),
       host_patterns: z.array(z.string()).optional().describe("Only spoof requests to hostnames containing these substrings. Empty = spoof all HTTPS."),
     },
@@ -129,7 +129,7 @@ export function registerTlsTools(server: McpServer): void {
             type: "text" as const,
             text: JSON.stringify({
               status: "success",
-              message: "JA3 spoofing enabled",
+              message: "JA3 spoofing enabled (note: custom JA3 strings are not supported by the curl-impersonate backend; the default Chrome preset fingerprint will be used instead. Use proxy_set_fingerprint_spoof with a preset for explicit control.)",
               config: { ja3, userAgent: user_agent, hostPatterns: host_patterns ?? [] },
             }),
           }],
@@ -143,7 +143,7 @@ export function registerTlsTools(server: McpServer): void {
   // ── Set full fingerprint spoof ──
   server.tool(
     "proxy_set_fingerprint_spoof",
-    "Enable outgoing JA3 + HTTP/2 fingerprint spoofing via CycleTLS. Supports browser presets, HTTP/2 SETTINGS/PRIORITY frame fingerprints, header ordering, and more. Individual parameters override preset values.",
+    "Enable outgoing TLS + HTTP/2 fingerprint spoofing via curl-impersonate in Docker. Supports browser presets that select a curl-impersonate target binary (BoringSSL + nghttp2, matching real Chrome/Firefox). Individual parameters override preset values.",
     {
       preset: z.string().optional().describe("Browser preset name (e.g. 'chrome_131', 'chrome_136'). Use proxy_list_fingerprint_presets to see available options. Individual params below override preset values."),
       ja3: z.string().optional().describe("JA3 fingerprint string. Required if no preset is given."),
@@ -197,12 +197,18 @@ export function registerTlsTools(server: McpServer): void {
 
         await proxyManager.setFingerprintSpoof(config);
 
+        const warnings: string[] = [];
+        if (!preset && ja3) {
+          warnings.push("Custom JA3 strings are not supported by the curl-impersonate backend. The default Chrome preset fingerprint will be used. Use a preset for explicit control.");
+        }
+
         return {
           content: [{
             type: "text" as const,
             text: JSON.stringify({
               status: "success",
               message: "Fingerprint spoofing enabled",
+              ...(warnings.length > 0 ? { warnings } : {}),
               config,
             }),
           }],
@@ -234,7 +240,7 @@ export function registerTlsTools(server: McpServer): void {
   // ── Clear JA3 spoof ──
   server.tool(
     "proxy_clear_ja3_spoof",
-    "Disable outgoing JA3 fingerprint spoofing and shut down CycleTLS subprocess.",
+    "Disable fingerprint spoofing and stop curl-impersonate container.",
     {},
     async () => {
       try {
