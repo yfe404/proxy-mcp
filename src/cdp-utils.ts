@@ -148,6 +148,179 @@ export async function waitForCdpVersion(port: number, opts: WaitForCdpOptions = 
  * Send a single CDP command to a target WebSocket endpoint and wait for its reply.
  * Useful for deterministic one-shot actions (e.g. Page.navigate) from MCP tools.
  */
+// ── Persistent CDP session ───────────────────────────────────────────
+
+interface PendingCommand {
+  resolve: (result: Record<string, unknown>) => void;
+  reject: (err: Error) => void;
+  method: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * Persistent WebSocket connection to a CDP target.
+ *
+ * Unlike `sendCdpCommand()` (fire-and-forget, one WS per command), CdpSession
+ * keeps the socket open so session-scoped CDP domains like `Emulation` remain
+ * active for the browser tab's lifetime.
+ */
+export class CdpSession {
+  private _ws: MinimalWebSocket;
+  private _closed = false;
+  private _nextId = 1;
+  private _pending = new Map<number, PendingCommand>();
+
+  private constructor(ws: MinimalWebSocket) {
+    this._ws = ws;
+
+    ws.addEventListener("message", this._onMessage);
+    ws.addEventListener("close", this._onClose);
+    ws.addEventListener("error", this._onError);
+  }
+
+  /** Open a persistent CDP session to `wsUrl`. */
+  static async open(wsUrl: string, opts?: { timeoutMs?: number }): Promise<CdpSession> {
+    const timeoutMs = opts?.timeoutMs ?? 5000;
+    const WS = getWebSocketCtor();
+    const ws = new WS(wsUrl);
+
+    return new Promise<CdpSession>((resolve, reject) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        try { ws.close(); } catch { /* */ }
+        reject(new Error(`CdpSession: connection to ${wsUrl} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const onOpen = (): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        ws.removeEventListener("open", onOpen);
+        ws.removeEventListener("error", onErr);
+        resolve(new CdpSession(ws));
+      };
+
+      const onErr = (): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        ws.removeEventListener("open", onOpen);
+        ws.removeEventListener("error", onErr);
+        reject(new Error(`CdpSession: failed to connect to ${wsUrl}`));
+      };
+
+      ws.addEventListener("open", onOpen);
+      ws.addEventListener("error", onErr);
+    });
+  }
+
+  get closed(): boolean {
+    return this._closed;
+  }
+
+  /** Send a CDP command and wait for its response. */
+  async send(
+    method: string,
+    params?: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
+  ): Promise<Record<string, unknown>> {
+    if (this._closed) throw new Error("CdpSession is closed");
+
+    const timeoutMs = opts?.timeoutMs ?? 5000;
+    const id = this._nextId++;
+
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._pending.delete(id);
+        reject(new Error(`CdpSession: timeout waiting for '${method}' (id=${id}) after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      this._pending.set(id, { resolve, reject, method, timer });
+
+      try {
+        this._ws.send(JSON.stringify({ id, method, ...(params ? { params } : {}) }));
+      } catch (e) {
+        this._pending.delete(id);
+        clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    });
+  }
+
+  /** Cleanly close the session. */
+  close(): void {
+    if (this._closed) return;
+    this._closed = true;
+
+    // Reject all pending commands
+    for (const [id, pending] of this._pending) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(`CdpSession closed while '${pending.method}' (id=${id}) was pending`));
+    }
+    this._pending.clear();
+
+    this._ws.removeEventListener("message", this._onMessage);
+    this._ws.removeEventListener("close", this._onClose);
+    this._ws.removeEventListener("error", this._onError);
+
+    try { this._ws.close(1000, "CdpSession.close"); } catch { /* */ }
+  }
+
+  // ── Internal event handlers (arrow fns for stable `this`) ──
+
+  private _onMessage = (event: unknown): void => {
+    let payload: CdpCommandResponse;
+    try {
+      payload = JSON.parse(messageDataToString(event)) as CdpCommandResponse;
+    } catch {
+      return; // ignore non-JSON frames (CDP events)
+    }
+
+    if (payload.id == null) return; // CDP event, not a command response
+    const pending = this._pending.get(payload.id);
+    if (!pending) return;
+
+    this._pending.delete(payload.id);
+    clearTimeout(pending.timer);
+
+    if (payload.error) {
+      const msg = payload.error.message || "Unknown CDP error";
+      pending.reject(new Error(`CDP ${pending.method} failed: ${msg}`));
+    } else {
+      pending.resolve(payload.result ?? {});
+    }
+  };
+
+  private _onClose = (): void => {
+    if (!this._closed) {
+      this._closed = true;
+      for (const [, pending] of this._pending) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(`CdpSession WebSocket closed unexpectedly`));
+      }
+      this._pending.clear();
+    }
+  };
+
+  private _onError = (): void => {
+    // Error is typically followed by close; just mark closed
+    if (!this._closed) {
+      this._closed = true;
+      for (const [, pending] of this._pending) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(`CdpSession WebSocket error`));
+      }
+      this._pending.clear();
+    }
+  };
+}
+
+/**
+ * Send a single CDP command to a target WebSocket endpoint and wait for its reply.
+ * Useful for deterministic one-shot actions (e.g. Page.navigate) from MCP tools.
+ */
 export async function sendCdpCommand(
   wsUrl: string,
   method: string,

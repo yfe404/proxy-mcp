@@ -1071,7 +1071,14 @@ export class ProxyManager {
               const matches = spoofConfig.hostPatterns.some((p) =>
                 hostname.includes(p) || hostname.endsWith(p)
               );
-              if (!matches) return {};
+              if (!matches) {
+                // Host doesn't match CycleTLS patterns — pass through without
+                // header modification.  Returning modified headers from beforeRequest
+                // changes how mockttp processes the upstream connection and can break
+                // TLS handshakes with strict servers (e.g. Akamai edge CDNs).
+                // The browser's --user-agent flag already ensures a consistent UA.
+                return {};
+              }
             }
 
             try {

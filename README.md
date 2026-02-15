@@ -304,7 +304,7 @@ proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
 | `proxy_get_tls_config` | Return current TLS config (server capture, JA3 spoof state) |
 | `proxy_enable_server_tls_capture` | Toggle server-side JA3S capture (monkey-patches `tls.connect`) |
 | `proxy_set_fingerprint_spoof` | Enable full fingerprint spoofing: JA3 + HTTP/2 frames + header order. Supports browser presets. |
-| `proxy_list_fingerprint_presets` | List available browser fingerprint presets (e.g. `chrome_131`, `chrome_136`, `firefox_133`) |
+| `proxy_list_fingerprint_presets` | List available browser fingerprint presets (e.g. `chrome_131`, `chrome_136`, `chrome_136_linux`, `firefox_133`) |
 
 Fingerprint spoofing works by re-issuing the request from the proxy via CycleTLS. The origin server sees the proxy's spoofed TLS (JA3), HTTP/2 (SETTINGS/WINDOW_UPDATE/PRIORITY frames), and header order — not the original client's. When a `user_agent` is set (including via presets), proxy-mcp also normalizes Chromium UA Client Hints headers (`sec-ch-ua*`) to match the spoofed User-Agent (forwarding contradictory hints is a common bot signal). Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup, or specify individual parameters for fine-grained control. `proxy_set_ja3_spoof` is kept for backward compatibility (JA3-only). JA4 fingerprints are captured (read-only) but spoofing is not supported.
 
@@ -330,6 +330,8 @@ Interceptors configure targets (browsers, processes, devices, containers) to rou
 | `interceptor_chrome_close` | Close a Chrome instance by target ID |
 
 Launches with isolated temp profile, auto-cleaned on close. Supports `chrome`, `chromium`, `brave`, `edge`.
+
+When fingerprint spoofing is active (`proxy_set_fingerprint_spoof`), Chrome launches in **stealth mode**: chrome-launcher's default flags that create detectable artifacts (e.g. `--disable-extensions` removing `chrome.runtime`) are replaced with a curated minimal set, and anti-detection patches are injected via CDP before any page scripts run. This covers `navigator.webdriver`, `chrome.runtime` presence, `Permissions.query`, and Error stack sanitization.
 
 #### Terminal / Process (2)
 
@@ -465,6 +467,7 @@ proxy_search_traffic --query "error"
 proxy_list_tls_fingerprints                # See unique JA3/JA4 fingerprints
 proxy_set_ja3_spoof --ja3 "771,4865-..."   # Spoof outgoing JA3
 proxy_set_fingerprint_spoof --preset chrome_136 --host_patterns '["example.com"]'  # Full fingerprint spoof
+interceptor_chrome_launch --url "https://example.com"       # With spoof active → stealth mode auto-enabled
 proxy_list_fingerprint_presets                  # Available browser presets
 
 # Query/export recorded session

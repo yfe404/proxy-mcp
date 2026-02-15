@@ -75,6 +75,129 @@ function rewriteSecChUaMajor(value: string, major: string): string {
  * Apply outgoing header overrides that keep User-Agent and UA Client Hints
  * consistent with a spoof preset.
  */
+// ── CDP identity derivation ──────────────────────────────────────────
+
+export interface UserAgentMetadata {
+  brands: Array<{ brand: string; version: string }>;
+  fullVersionList: Array<{ brand: string; version: string }>;
+  platform: string;
+  platformVersion: string;
+  architecture: string;
+  model: string;
+  mobile: boolean;
+  bitness: string;
+  wow64: boolean;
+}
+
+/**
+ * Derive `navigator.platform` from the UA string.
+ *
+ * Maps to values real browsers return:
+ * - Windows → "Win32"
+ * - macOS   → "MacIntel"
+ * - Linux   → "Linux x86_64"
+ * - Android → "Linux armv81" (or similar)
+ * - iOS     → "iPhone" / "iPad"
+ */
+export function deriveNavigatorPlatformFromUA(userAgent: string): string {
+  if (/Windows NT/i.test(userAgent)) return "Win32";
+  if (/(iPhone|iPod)/i.test(userAgent)) return "iPhone";
+  if (/iPad/i.test(userAgent)) return "iPad";
+  if (/Mac OS X/i.test(userAgent)) return "MacIntel";
+  if (/Android/i.test(userAgent)) return "Linux armv8l";
+  if (/Linux/i.test(userAgent)) return "Linux x86_64";
+  return "";
+}
+
+function derivePlatformArch(userAgent: string): { architecture: string; bitness: string; wow64: boolean } {
+  if (/Win64|WOW64|x64/i.test(userAgent)) return { architecture: "x86", bitness: "64", wow64: false };
+  if (/Windows NT/i.test(userAgent)) return { architecture: "x86", bitness: "64", wow64: false };
+  if (/Mac OS X/i.test(userAgent)) return { architecture: "arm", bitness: "64", wow64: false };
+  if (/Android/i.test(userAgent)) return { architecture: "", bitness: "", wow64: false };
+  if (/Linux/i.test(userAgent)) return { architecture: "x86", bitness: "64", wow64: false };
+  return { architecture: "", bitness: "", wow64: false };
+}
+
+function derivePlatformVersion(userAgent: string): string {
+  // Windows NT 10.0 → report "15.0.0" (Win11 style) or "10.0.0"
+  const winMatch = userAgent.match(/Windows NT (\d+)\.(\d+)/i);
+  if (winMatch) return "15.0.0";
+
+  // Mac OS X 10_15_7 or Mac OS X 14_0
+  const macMatch = userAgent.match(/Mac OS X (\d+)[_.](\d+)(?:[_.](\d+))?/i);
+  if (macMatch) return `${macMatch[1]}.${macMatch[2]}.${macMatch[3] || "0"}`;
+
+  // Android 14
+  const androidMatch = userAgent.match(/Android (\d+)(?:\.(\d+))?/i);
+  if (androidMatch) return `${androidMatch[1]}.${androidMatch[2] || "0"}.0`;
+
+  return "0.0.0";
+}
+
+function buildBrandsList(major: string): Array<{ brand: string; version: string }> {
+  // Chrome uses GREASE-like "Not/A)Brand" entries that vary per version.
+  // These are representative patterns; the exact GREASE rotates but
+  // bot-detection checks that brand list structure looks plausible.
+  const majorNum = parseInt(major, 10);
+  const greaseSlot = majorNum % 4;
+  const greasBrands = [
+    "Not)A;Brand",
+    "Not A(Brand",
+    "Not/A)Brand",
+    "Not:A-Brand",
+  ];
+  const grease = greasBrands[greaseSlot] || "Not;A=Brand";
+
+  return [
+    { brand: "Chromium", version: major },
+    { brand: "Google Chrome", version: major },
+    { brand: grease, version: "99" },
+  ];
+}
+
+/**
+ * Build `Emulation.setUserAgentOverride` `userAgentMetadata` from a UA string.
+ * Returns `null` for non-Chromium UAs (Firefox/Safari don't have Client Hints).
+ */
+export function buildUserAgentMetadata(userAgent: string): UserAgentMetadata | null {
+  if (!isChromiumLikeUserAgent(userAgent)) return null;
+  const major = parseChromiumMajor(userAgent);
+  if (!major) return null;
+
+  const platform = derivePlatform(userAgent) ?? "Windows";
+  const mobile = isMobileUserAgent(userAgent);
+  const { architecture, bitness, wow64 } = derivePlatformArch(userAgent);
+  const platformVersion = derivePlatformVersion(userAgent);
+
+  // Extract full Chrome version (e.g. "136.0.0.0")
+  const fullVersionMatch = userAgent.match(/\bChrome\/(\d+\.\d+\.\d+\.\d+)/i);
+  const fullVersion = fullVersionMatch ? fullVersionMatch[1] : `${major}.0.0.0`;
+
+  const brands = buildBrandsList(major);
+  const fullVersionList = brands.map(b => ({
+    brand: b.brand,
+    version: b.brand.includes("Brand") ? `99.0.0.0` : fullVersion,
+  }));
+
+  // Model is typically empty for desktop; Android may have it but we
+  // don't embed device model in the UA, so leave empty.
+  return {
+    brands,
+    fullVersionList,
+    platform,
+    platformVersion,
+    architecture,
+    model: "",
+    mobile,
+    bitness,
+    wow64,
+  };
+}
+
+/**
+ * Apply outgoing header overrides that keep User-Agent and UA Client Hints
+ * consistent with a spoof preset.
+ */
 export function applyFingerprintHeaderOverrides(
   headers: Record<string, string>,
   opts: FingerprintHeaderOverrideOptions,
