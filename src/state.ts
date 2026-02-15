@@ -14,7 +14,7 @@ import type { CompletedRequest, CompletedResponse, ProxyConfig } from "mockttp";
 import { randomUUID } from "node:crypto";
 import { serializeHeaders, capString } from "./utils.js";
 import { enableServerTlsCapture, type ServerTlsCapture } from "./tls-utils.js";
-import { spoofedRequest, shutdownCycleTLS } from "./tls-spoof.js";
+import { spoofedRequest, shutdownCycleTLS, stripHopByHopHeaders } from "./tls-spoof.js";
 import { applyFingerprintHeaderOverrides } from "./spoof-headers.js";
 import { interceptorManager } from "./interceptors/manager.js";
 import { cleanupTempCerts } from "./interceptors/cert-utils.js";
@@ -1099,9 +1099,10 @@ export class ProxyManager {
 
               const result = await spoofedRequest(req.url, {
                 method: req.method,
-                headers: applyFingerprintHeaderOverrides(req.headers as Record<string, string>, {
-                  userAgent: spoofConfig.userAgent,
-                }),
+                headers: applyFingerprintHeaderOverrides(
+                  stripHopByHopHeaders(req.headers as Record<string, string>),
+                  { userAgent: spoofConfig.userAgent },
+                ),
                 body: req.body.buffer.length > 0 ? req.body.buffer.toString("utf-8") : undefined,
                 ja3: spoofConfig.ja3,
                 userAgent: spoofConfig.userAgent,

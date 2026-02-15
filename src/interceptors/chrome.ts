@@ -139,12 +139,14 @@ export class ChromeInterceptor implements Interceptor {
           `--ignore-certificate-errors-spki-list=${certFingerprint}`,
           "--proxy-bypass-list=<-loopback>",
           "--remote-debugging-address=127.0.0.1",
+          "--disable-quic",
         ]
       : [
           `--proxy-server=http://127.0.0.1:${proxyPort}`,
           `--ignore-certificate-errors-spki-list=${certFingerprint}`,
           "--proxy-bypass-list=<-loopback>",
           "--remote-debugging-address=127.0.0.1",
+          "--disable-quic",
         ];
 
     if (incognito) {
