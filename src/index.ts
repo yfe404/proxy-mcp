@@ -82,10 +82,7 @@ async function startStdio() {
 /* ------------------------------------------------------------------ */
 
 async function startHttp(port: number) {
-  // One MCP server instance shared across all sessions
-  const server = createMcpServer();
-
-  // Session map: sessionId → transport
+  // Session map: sessionId → { transport, server }
   const sessions = new Map<string, StreamableHTTPServerTransport>();
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -130,8 +127,10 @@ async function startHttp(port: number) {
       return;
     }
 
-    // New initialization
+    // New initialization — create a fresh McpServer per session so
+    // multiple clients (Claude Code + scripts) can connect simultaneously.
     if (!sessionId && isInitializeRequest(body)) {
+      const sessionServer = createMcpServer();
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid) => {
@@ -144,7 +143,7 @@ async function startHttp(port: number) {
         if (sid) sessions.delete(sid);
       };
 
-      await server.connect(transport);
+      await sessionServer.connect(transport);
       await transport.handleRequest(req, res, body);
       return;
     }
