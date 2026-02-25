@@ -2,8 +2,8 @@
  * Proxy MCP Server — entry point.
  *
  * HTTPS MITM proxy via mockttp with lifecycle/rules/traffic/TLS/interceptors/session tools and resources.
- * Tools organized into 8 modules:
- *   lifecycle, upstream, rules, traffic, modification, tls, interceptors, devtools
+ * Tools organized into 9 modules:
+ *   lifecycle, upstream, rules, traffic, modification, tls, interceptors, devtools, sessions
  *
  * Transports:
  *   --transport stdio   (default) communicate over stdin/stdout

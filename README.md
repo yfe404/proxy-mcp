@@ -80,75 +80,42 @@ If launching Chrome manually, pass proxy flag yourself:
 google-chrome --proxy-server="http://127.0.0.1:<port>"
 ```
 
-### 4) CLI/process setup (manual)
+### 4) CLI/process setup
 
 Route any process through proxy-mcp by setting proxy env vars:
 
 ```bash
 export HTTP_PROXY="http://127.0.0.1:<port>"
 export HTTPS_PROXY="http://127.0.0.1:<port>"
+export NO_PROXY="localhost,127.0.0.1"
 ```
 
-If the client verifies TLS, trust the proxy-mcp CA certificate (see `proxy_get_ca_cert`) or use the Terminal interceptor (`interceptor_spawn`) which sets proxy env vars plus common CA env vars (curl, Node, Python requests, Git, npm/yarn, etc.).
-
-### 5) Upstream proxy chaining (geo/auth)
-
-If you need proxy-mcp to egress through another upstream proxy (for geolocation, auth, or IP reputation), set a global upstream:
-
-```bash
-proxy_set_upstream --proxy_url "socks5://user:pass@upstream.example:1080"
-```
-
-Supported upstream URL schemes: `socks4://`, `socks5://`, `http://`, `https://`, `pac+http://`.
-
-Per-host override:
-
-```bash
-proxy_set_host_upstream --hostname "api.example.com" --proxy_url "http://user:pass@upstream.example:8080"
-```
-
-Disable upstream chaining:
-
-```bash
-proxy_clear_upstream
-```
-
-For HTTPS MITM, the proxy CA must be trusted in the target environment (`proxy_get_ca_cert`).
-
-### 4) Process/app HTTP proxy env vars
-
-Most CLI/SDK clients follow:
-
-```bash
-HTTP_PROXY=http://127.0.0.1:<port>
-HTTPS_PROXY=http://127.0.0.1:<port>
-NO_PROXY=localhost,127.0.0.1
-```
-
-Or let proxy-mcp configure env/cert automatically:
+If the client verifies TLS, trust the proxy-mcp CA certificate (see `proxy_get_ca_cert`) or use the Terminal interceptor (`interceptor_spawn`) which sets proxy env vars plus common CA env vars (curl, Node, Python requests, Git, npm/yarn, etc.):
 
 ```bash
 interceptor_spawn --command curl --args '["-s","https://example.com"]'
 ```
 
-### 5) Explicit HTTP client examples
+Explicit `curl` examples:
 
 ```bash
 curl --proxy http://127.0.0.1:<port> http://example.com
 curl --proxy http://127.0.0.1:<port> https://example.com
 ```
 
-### 6) Upstream HTTP proxy chaining
+### 5) Upstream proxy chaining
 
-Set optional proxy chaining from proxy-mcp to another upstream proxy:
+Set optional proxy chaining from proxy-mcp to another upstream proxy (for geolocation, auth, or IP reputation):
 
-```bash
-proxy_set_upstream --proxy_url "http://user:pass@upstream-host:8080"
+```
+Client/app  →  proxy-mcp (local explicit proxy)  →  upstream proxy (optional chaining layer)
 ```
 
-Model:
-- Client/app -> `proxy-mcp` (local explicit proxy)
-- `proxy-mcp` -> upstream proxy (optional chaining layer)
+```bash
+proxy_set_upstream --proxy_url "socks5://user:pass@upstream.example:1080"
+```
+
+Supported upstream URL schemes: `socks4://`, `socks5://`, `http://`, `https://`, `pac+http://`.
 
 Typical geo-routing examples:
 
@@ -167,9 +134,9 @@ proxy_remove_host_upstream --hostname "api.example.com"
 proxy_clear_upstream
 ```
 
-Supported upstream URL schemes: `socks4://`, `socks5://`, `http://`, `https://`, `pac+http://`.
+For HTTPS MITM, the proxy CA must be trusted in the target environment (`proxy_get_ca_cert`).
 
-### 7) Validate and troubleshoot quickly
+### 6) Validate and troubleshoot quickly
 
 ```bash
 proxy_list_traffic --limit 20
@@ -188,7 +155,7 @@ Pull/install sidecar directly from MCP:
 interceptor_chrome_devtools_pull_sidecar --version "0.2.2"
 ```
 
-### 8) HAR import + replay
+### 7) HAR import + replay
 
 Import HAR into a persisted session, then analyze with existing session query/findings tools:
 
@@ -228,7 +195,29 @@ npm install
 npm run build
 ```
 
+### Run
+
+```bash
+# stdio transport (default) — used by MCP clients like Claude Code
+node dist/index.js
+
+# Streamable HTTP transport — exposes /mcp endpoint
+node dist/index.js --transport http --port 3001
+```
+
+`--transport` and `--port` also accept env vars `TRANSPORT` and `PORT`.
+
+### Global install (optional)
+
+```bash
+npm install -g .
+```
+
+This makes the `proxy-mcp` command available system-wide (see `bin` in `package.json`).
+
 ### Claude Code `.mcp.json`
+
+stdio transport (default):
 
 ```json
 {
@@ -236,6 +225,31 @@ npm run build
     "proxy": {
       "command": "node",
       "args": ["/path/to/proxy-mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+If installed globally, you can use the `proxy-mcp` command directly:
+
+```json
+{
+  "mcpServers": {
+    "proxy": {
+      "command": "proxy-mcp"
+    }
+  }
+}
+```
+
+Streamable HTTP transport:
+
+```json
+{
+  "mcpServers": {
+    "proxy": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:3001/mcp"
     }
   }
 }
