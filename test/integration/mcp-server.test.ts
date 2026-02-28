@@ -54,7 +54,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 75 tools", async () => {
+  it("lists all 76 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -120,7 +120,8 @@ describe("MCP Server Integration", () => {
     // Fingerprint spoofing tools
     assert.ok(names.includes("proxy_set_fingerprint_spoof"));
     assert.ok(names.includes("proxy_list_fingerprint_presets"));
-    assert.equal(names.length, 75);
+    assert.ok(names.includes("proxy_check_fingerprint_runtime"));
+    assert.equal(names.length, 76);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {
@@ -156,6 +157,17 @@ describe("MCP Server Integration", () => {
     const stopResult = await client.callTool({ name: "proxy_stop", arguments: {} });
     const stopData = JSON.parse((stopResult.content as Array<{ text: string }>)[0].text);
     assert.equal(stopData.status, "success");
+  });
+
+  it("checks fingerprint runtime preflight", async () => {
+    const { client, cleanup: c } = await createTestSetup();
+    cleanup = c;
+
+    const res = await client.callTool({ name: "proxy_check_fingerprint_runtime", arguments: {} });
+    const data = JSON.parse((res.content as Array<{ text: string }>)[0].text);
+    assert.equal(data.status, "success");
+    assert.equal(typeof data.ready, "boolean");
+    assert.ok(Array.isArray(data.runtimes));
   });
 
   it("can enable persistence from proxy_start", async (t) => {

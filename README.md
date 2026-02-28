@@ -2,7 +2,7 @@
 
 proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. It also ships "interceptors" to route Chrome, CLI tools, Docker containers, and Android devices/apps through the proxy.
 
-75 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
+76 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
 
 ### Boundaries
 
@@ -314,7 +314,7 @@ proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
 | `proxy_rewrite_url` | Rewrite request URLs |
 | `proxy_mock_response` | Return mock response for matched requests |
 
-### TLS Fingerprinting (8)
+### TLS Fingerprinting (9)
 
 | Tool | Description |
 |------|-------------|
@@ -326,6 +326,7 @@ proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
 | `proxy_enable_server_tls_capture` | Toggle server-side JA3S capture (monkey-patches `tls.connect`) |
 | `proxy_set_fingerprint_spoof` | Enable full TLS + HTTP/2 fingerprint spoofing via curl-impersonate in Docker/Podman. Supports browser presets. |
 | `proxy_list_fingerprint_presets` | List available browser fingerprint presets (e.g. `chrome_131`, `chrome_136`, `chrome_136_linux`, `firefox_133`) |
+| `proxy_check_fingerprint_runtime` | Preflight Docker/Podman readiness for fingerprint spoofing (runtime health, image/container presence) |
 
 Fingerprint spoofing works by re-issuing the request from the proxy via curl-impersonate running in a Docker or Podman container. curl-impersonate uses BoringSSL + nghttp2 (the same TLS and HTTP/2 libraries as Chrome), so TLS 1.3 and HTTP/2 fingerprints (SETTINGS, WINDOW_UPDATE, PRIORITY frames) match real browsers by construction. The origin server sees the proxy's spoofed TLS, HTTP/2, and header order — not the original client's. When a `user_agent` is set (including via presets), proxy-mcp also normalizes Chromium UA Client Hints headers (`sec-ch-ua*`) to match the spoofed User-Agent (forwarding contradictory hints is a common bot signal). Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup. `proxy_set_ja3_spoof` is kept for backward compatibility but custom JA3 strings are ignored (the preset's curl-impersonate target is used instead). JA4 fingerprints are captured (read-only) but spoofing is not supported.
 

@@ -1,10 +1,10 @@
 /**
  * curl-impersonate wrapper for TLS + HTTP/2 fingerprint spoofing.
  *
- * Runs curl-impersonate inside a Docker container (debian:bookworm-slim based
- * image with pre-installed binaries from the lexiforest/curl-impersonate fork).
- * The container uses host networking and stays alive via `sleep infinity` so
- * requests are issued via `docker exec`.
+ * Runs curl-impersonate inside a long-lived Docker/Podman container
+ * (debian:bookworm-slim based image with pre-installed binaries from
+ * the lexiforest/curl-impersonate fork). Requests are issued via
+ * `docker exec`/`podman exec`.
  *
  * Replaces the former CycleTLS backend — curl-impersonate uses BoringSSL +
  * nghttp2 (same libs as Chrome), so TLS 1.3 and HTTP/2 fingerprints match
@@ -13,47 +13,161 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import Docker from "dockerode";
 import { resolveBrowserPreset } from "./browser-presets.js";
 
 const execFileAsync = promisify(execFile);
 
-// Detect container runtime: prefer docker, fall back to podman.
+// Detect a usable container runtime: prefer docker, fall back to podman.
 let _containerCli: string | null = null;
-async function containerCli(): Promise<string> {
-  if (_containerCli) return _containerCli;
-  for (const bin of ["docker", "podman"]) {
-    try {
-      await execFileAsync(bin, ["--version"], { timeout: 5_000 });
-      _containerCli = bin;
-      return bin;
-    } catch { /* not found or not working — try next */ }
-  }
-  throw new Error("Neither docker nor podman found on PATH");
+
+type ExecResult = { stdout: Buffer; stderr: Buffer };
+type RuntimeProbe = {
+  name: string;
+  available: boolean;
+  operational: boolean;
+  version?: string;
+  error?: string;
+};
+type ImageInspectResult = { name: string; exists: boolean; error?: string };
+type ContainerInspectResult = {
+  name: string;
+  exists: boolean;
+  running: boolean;
+  id?: string;
+  error?: string;
+};
+
+function toBuffer(data: Buffer | string): Buffer {
+  return Buffer.isBuffer(data) ? data : Buffer.from(data, "utf-8");
 }
 
-/**
- * Create a dockerode instance, auto-detecting the container socket.
- * Checks DOCKER_HOST first, then the default docker socket, then
- * the podman user socket.
- */
-function createDockerClient(): InstanceType<typeof Docker> {
-  if (process.env.DOCKER_HOST) return new Docker();
+function stringifyExecError(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const err = error as { message?: string; stderr?: Buffer | string; stdout?: Buffer | string };
+  const parts: string[] = [];
+  if (err.message) parts.push(err.message);
+  if (err.stderr) {
+    const stderr = toBuffer(err.stderr).toString("utf-8").trim();
+    if (stderr) parts.push(stderr);
+  }
+  if (err.stdout) {
+    const stdout = toBuffer(err.stdout).toString("utf-8").trim();
+    if (stdout) parts.push(stdout);
+  }
+  return parts.join(" | ");
+}
 
-  const defaultSocket = "/var/run/docker.sock";
-  if (fs.existsSync(defaultSocket)) return new Docker({ socketPath: defaultSocket });
+function parseVersionText(stdout: Buffer, stderr: Buffer): string | undefined {
+  const text = `${stdout.toString("utf-8")}\n${stderr.toString("utf-8")}`.trim();
+  if (!text) return undefined;
+  const line = text.split(/\r?\n/)[0]?.trim();
+  return line || undefined;
+}
 
-  const uid = process.getuid?.();
-  if (uid !== undefined) {
-    const podmanSocket = `/run/user/${uid}/podman/podman.sock`;
-    if (fs.existsSync(podmanSocket)) return new Docker({ socketPath: podmanSocket });
+function isNotFoundErrorMessage(message: string): boolean {
+  const msg = message.toLowerCase();
+  return (
+    msg.includes("no such object")
+    || msg.includes("no such container")
+    || msg.includes("unable to find image")
+    || msg.includes("not found")
+  );
+}
+
+async function execContainerCli(
+  cli: string,
+  args: string[],
+  opts?: { timeout?: number; maxBuffer?: number },
+): Promise<ExecResult> {
+  const { stdout, stderr } = await execFileAsync(cli, args, {
+    timeout: opts?.timeout ?? 60_000,
+    maxBuffer: opts?.maxBuffer ?? 50 * 1024 * 1024,
+    encoding: "buffer",
+  });
+  return { stdout: toBuffer(stdout), stderr: toBuffer(stderr) };
+}
+
+async function probeRuntime(cli: string): Promise<RuntimeProbe> {
+  let version: string | undefined;
+  try {
+    const { stdout, stderr } = await execContainerCli(cli, ["--version"], {
+      timeout: 5_000,
+      maxBuffer: 1 * 1024 * 1024,
+    });
+    version = parseVersionText(stdout, stderr);
+  } catch {
+    return { name: cli, available: false, operational: false, error: "binary not found on PATH" };
   }
 
-  // Last resort — let dockerode try its default
-  return new Docker();
+  try {
+    await execContainerCli(cli, ["info"], { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
+    return { name: cli, available: true, operational: true, version };
+  } catch (error) {
+    return {
+      name: cli,
+      available: true,
+      operational: false,
+      version,
+      error: stringifyExecError(error) || "runtime not operational",
+    };
+  }
+}
+
+async function inspectContainerByName(cli: string, name: string): Promise<ContainerInspectResult> {
+  try {
+    const { stdout } = await execContainerCli(
+      cli,
+      ["container", "inspect", name, "--format", "{{.Id}}|{{.State.Running}}"],
+      { timeout: 10_000, maxBuffer: 2 * 1024 * 1024 },
+    );
+    const line = stdout.toString("utf-8").trim();
+    if (!line) return { name, exists: false, running: false, error: "empty inspect output" };
+
+    const [idRaw, runningRaw] = line.split("|");
+    if (!idRaw) return { name, exists: false, running: false, error: "invalid inspect output" };
+
+    return {
+      name,
+      exists: true,
+      running: runningRaw?.trim() === "true",
+      id: idRaw.trim(),
+    };
+  } catch (error) {
+    const message = stringifyExecError(error);
+    if (isNotFoundErrorMessage(message)) return { name, exists: false, running: false };
+    return { name, exists: false, running: false, error: message || String(error) };
+  }
+}
+
+async function inspectImageByName(cli: string, name: string): Promise<ImageInspectResult> {
+  try {
+    await execContainerCli(cli, ["image", "inspect", name], { timeout: 20_000, maxBuffer: 4 * 1024 * 1024 });
+    return { name, exists: true };
+  } catch (error) {
+    const message = stringifyExecError(error);
+    if (isNotFoundErrorMessage(message)) return { name, exists: false };
+    return { name, exists: false, error: message || String(error) };
+  }
+}
+
+async function containerCli(): Promise<string> {
+  if (_containerCli) return _containerCli;
+
+  const failures: string[] = [];
+  for (const bin of ["docker", "podman"]) {
+    const usable = await probeRuntime(bin);
+    if (usable.operational) {
+      _containerCli = bin;
+      return bin;
+    }
+    failures.push(`${bin}: ${usable.error ?? "runtime not operational"}`);
+  }
+
+  throw new Error(
+    `No usable container runtime found (docker/podman). Checked: ${failures.join("; ")}`
+  );
 }
 
 const IMAGE_NAME = "proxy-mcp-curl-impersonate";
@@ -89,6 +203,52 @@ export interface SpoofOptions {
   preset?: string;          // browser preset name → selects curlBinary
 }
 
+export interface FingerprintRuntimeCheck {
+  status: "success";
+  ready: boolean;
+  runtime: {
+    selected: string | null;
+    recommended: string | null;
+    cached: string | null;
+    cacheStale: boolean;
+  };
+  inspectedWithRuntime: string | null;
+  runtimes: RuntimeProbe[];
+  image: ImageInspectResult;
+  container: ContainerInspectResult;
+}
+
+/**
+ * Probe Docker/Podman readiness for fingerprint spoofing without sending traffic.
+ */
+export async function checkSpoofRuntime(): Promise<FingerprintRuntimeCheck> {
+  const runtimes = await Promise.all(["docker", "podman"].map((name) => probeRuntime(name)));
+  const recommended = runtimes.find((r) => r.operational)?.name ?? null;
+  const cached = _containerCli;
+  const selected = cached ?? recommended;
+  const cacheStale = !!cached && !runtimes.some((r) => r.name === cached && r.operational);
+  const inspectRuntime = (!cacheStale ? selected : recommended) ?? null;
+
+  let image: ImageInspectResult = { name: IMAGE_NAME, exists: false };
+  let container: ContainerInspectResult = { name: CONTAINER_NAME, exists: false, running: false };
+  if (inspectRuntime) {
+    [image, container] = await Promise.all([
+      inspectImageByName(inspectRuntime, IMAGE_NAME),
+      inspectContainerByName(inspectRuntime, CONTAINER_NAME),
+    ]);
+  }
+
+  return {
+    status: "success",
+    ready: !!selected && runtimes.some((r) => r.name === selected && r.operational),
+    runtime: { selected, recommended, cached, cacheStale },
+    inspectedWithRuntime: inspectRuntime,
+    runtimes,
+    image,
+    container,
+  };
+}
+
 // ── Container lifecycle ──
 
 function getProjectRoot(): string {
@@ -106,53 +266,70 @@ async function ensureSpoofContainer(): Promise<string> {
 
   if (!initPromise) {
     initPromise = (async () => {
-      const docker = createDockerClient();
+      const cli = await containerCli();
 
-      // Check if container already exists and is running
-      try {
-        const existing = docker.getContainer(CONTAINER_NAME);
-        const info = await existing.inspect();
-        if (info.State.Running) {
-          containerId = info.Id;
-          return containerId;
+      const existing = await inspectContainerByName(cli, CONTAINER_NAME);
+      if (existing.exists) {
+        if (!existing.running) {
+          await execContainerCli(cli, ["container", "start", CONTAINER_NAME], { timeout: 30_000 });
         }
-        // Exists but not running — start it
-        await existing.start();
-        containerId = info.Id;
+        const current = await inspectContainerByName(cli, CONTAINER_NAME);
+        if (!current.exists) {
+          throw new Error(`Container '${CONTAINER_NAME}' disappeared after start`);
+        }
+        containerId = current.id ?? existing.id ?? null;
+        if (!containerId) {
+          throw new Error(`Could not resolve container ID for '${CONTAINER_NAME}'`);
+        }
         return containerId;
-      } catch {
-        // Container doesn't exist — continue to build + create
       }
 
       // Build image if not present
-      try {
-        await docker.getImage(IMAGE_NAME).inspect();
-      } catch {
+      const image = await inspectImageByName(cli, IMAGE_NAME);
+      if (!image.exists) {
+        if (image.error) throw new Error(`Failed to inspect image '${IMAGE_NAME}': ${image.error}`);
         const projectRoot = getProjectRoot();
         const dockerfilePath = path.join(projectRoot, "Dockerfile.curl-impersonate");
-
-        // Use execFile to build (simpler than dockerode tar stream)
-        const cli = await containerCli();
-        await execFileAsync(cli, [
-          "build",
-          "-f", dockerfilePath,
-          "-t", IMAGE_NAME,
-          projectRoot,
-        ], { timeout: 300_000 });
+        await execContainerCli(
+          cli,
+          ["build", "-f", dockerfilePath, "-t", IMAGE_NAME, projectRoot],
+          { timeout: 300_000, maxBuffer: 100 * 1024 * 1024 },
+        );
       }
 
-      // Create and start container
-      const container = await docker.createContainer({
-        Image: IMAGE_NAME,
-        name: CONTAINER_NAME,
-        Cmd: ["sleep", "infinity"],
-        HostConfig: { NetworkMode: "host" },
-      });
-      await container.start();
-      const info = await container.inspect();
-      containerId = info.Id;
+      // Create and start container. Use default network mode for better
+      // compatibility across docker/podman/rootless setups.
+      try {
+        await execContainerCli(
+          cli,
+          ["run", "-d", "--name", CONTAINER_NAME, IMAGE_NAME, "sleep", "infinity"],
+          { timeout: 60_000 },
+        );
+      } catch (error) {
+        // Handle races where another request created the container first.
+        const msg = stringifyExecError(error).toLowerCase();
+        if (!msg.includes("already in use")) throw error;
+      }
+
+      const created = await inspectContainerByName(cli, CONTAINER_NAME);
+      if (!created.exists) {
+        throw new Error(`Container '${CONTAINER_NAME}' was not found after creation`);
+      }
+      if (!created.running) {
+        await execContainerCli(cli, ["container", "start", CONTAINER_NAME], { timeout: 30_000 });
+      }
+      containerId = created.id ?? null;
+      if (!containerId) {
+        throw new Error(`Could not resolve container ID for '${CONTAINER_NAME}' after creation`);
+      }
       return containerId;
-    })();
+    })().catch((error) => {
+      // Transient runtime failures should not poison future attempts.
+      containerId = null;
+      initPromise = null;
+      _containerCli = null;
+      throw error;
+    });
   }
 
   return initPromise;
@@ -401,9 +578,8 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
   // URL must be last
   args.push(url);
 
-  const { stdout, stderr } = await execFileAsync(cli, args, {
+  const { stdout, stderr } = await execContainerCli(cli, args, {
     maxBuffer: 50 * 1024 * 1024,
-    encoding: "buffer",
     timeout: 60_000,  // curl's own --max-time handles the actual limit
   });
 
@@ -431,18 +607,15 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
  * Called when spoofing is disabled or proxy stops.
  */
 export async function shutdownSpoofContainer(): Promise<void> {
-  if (containerId) {
-    try {
-      const docker = createDockerClient();
-      const container = docker.getContainer(containerId);
-      try { await container.stop({ t: 2 }); } catch { /* may already be stopped */ }
-      try { await container.remove({ force: true }); } catch { /* may already be removed */ }
-    } catch {
-      // Ignore shutdown errors
-    }
-    containerId = null;
-    initPromise = null;
+  try {
+    const cli = await containerCli();
+    try { await execContainerCli(cli, ["container", "stop", "-t", "2", CONTAINER_NAME], { timeout: 10_000 }); } catch { /* may already be stopped */ }
+    try { await execContainerCli(cli, ["container", "rm", "-f", CONTAINER_NAME], { timeout: 10_000 }); } catch { /* may already be removed */ }
+  } catch {
+    // Ignore shutdown errors
   }
+  containerId = null;
+  initPromise = null;
 }
 
 /**

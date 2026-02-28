@@ -8,6 +8,7 @@ import { proxyManager } from "../state.js";
 import type { FingerprintSpoofConfig } from "../state.js";
 import { truncateResult } from "../utils.js";
 import { resolveBrowserPreset, listBrowserPresets } from "../browser-presets.js";
+import { checkSpoofRuntime } from "../tls-spoof.js";
 
 export function registerTlsTools(server: McpServer): void {
   // ── Get TLS fingerprints for a specific exchange ──
@@ -234,6 +235,26 @@ export function registerTlsTools(server: McpServer): void {
           }),
         }],
       };
+    },
+  );
+
+  // ── Check fingerprint spoof runtime readiness ──
+  server.tool(
+    "proxy_check_fingerprint_runtime",
+    "Check Docker/Podman runtime readiness for TLS/HTTP2 fingerprint spoofing without sending traffic.",
+    {},
+    async () => {
+      try {
+        const runtime = await checkSpoofRuntime();
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify(runtime),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", error: String(e) }) }] };
+      }
     },
   );
 
