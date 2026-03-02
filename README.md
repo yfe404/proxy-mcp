@@ -2,7 +2,7 @@
 
 proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. It also ships "interceptors" to route Chrome, CLI tools, Docker containers, and Android devices/apps through the proxy.
 
-76 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
+81 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
 
 ### Boundaries
 
@@ -25,8 +25,9 @@ Use CDP/Playwright for browser internals (DOM, JS execution, localStorage, cooki
 | TLS fingerprint capture (JA3/JA4/JA3S) | No | Yes |
 | JA3 + HTTP/2 fingerprint spoofing | No | Proxy-side only (curl-impersonate re-issues matching requests with spoofed TLS 1.3, HTTP/2 frames, and header order; does not alter the client's TLS handshake) |
 | Intercept non-browser traffic (curl, Python, Android apps) | No | Yes (interceptors) |
+| Human-like mouse/keyboard/scroll input | Via Playwright `page.mouse`/`page.keyboard` (instant, detectable timing) | Yes — CDP humanizer with Bezier curves, Fitts's law, WPM typing, eased scrolling |
 
-A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through proxy automatically), drive pages with Playwright/CDP, and use proxy-mcp to capture the wire traffic, inject headers, or spoof JA3 — all in the same session.
+A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through proxy automatically), drive pages with Playwright/CDP, and use proxy-mcp to capture the wire traffic, inject headers, or spoof JA3 — all in the same session. For behavioral realism, use `humanizer_*` tools instead of Playwright's instant `page.click()`/`page.type()` — they dispatch human-like CDP `Input.*` events with natural timing curves.
 
 **Attach Playwright to proxy-launched Chrome:**
 
@@ -46,6 +47,14 @@ A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through p
 3. Call `interceptor_chrome_devtools_attach` with that `target_id`
 4. Call `interceptor_chrome_devtools_navigate` with `devtools_session_id`
 5. Call `proxy_search_traffic --query "<hostname>"` to confirm capture
+
+**Human-like input flow (bypasses bot detection):**
+
+1. Call `proxy_start`
+2. Optionally enable fingerprint spoofing: `proxy_set_fingerprint_spoof --preset chrome_136`
+3. Call `interceptor_chrome_launch --url "https://example.com"` (stealth mode auto-enabled when spoofing)
+4. Use `humanizer_move` / `humanizer_click` / `humanizer_type` / `humanizer_scroll` with the `target_id`
+5. Use `humanizer_idle` between actions to maintain natural presence
 
 ## HTTP Proxy Configuration
 
@@ -438,6 +447,26 @@ Persistent, queryable on-disk capture for long runs and post-crash analysis.
 | `proxy_delete_session` | Delete a stored session |
 | `proxy_session_recover` | Rebuild indexes from records after unclean shutdown |
 
+### Humanizer — CDP Input (5)
+
+Human-like browser input via Chrome DevTools Protocol. Dispatches `Input.*` events with realistic timing, Bezier mouse paths, and natural keystroke delays. Binds to `target_id` (Chrome interceptor target) — manages its own persistent CdpSession per target, independent of the DevTools Bridge sidecar.
+
+| Tool | Description |
+|------|-------------|
+| `humanizer_move` | Move mouse along a Bezier curve with Fitts's law velocity scaling and eased timing |
+| `humanizer_click` | Move to element (CSS selector) or coordinates, then click with human-like timing. Supports left/right/middle button and multi-click |
+| `humanizer_type` | Type text with per-character delays modeled on WPM, bigram frequency, shift penalty, word pauses, and optional typo injection |
+| `humanizer_scroll` | Scroll with easeInOutQuad acceleration/deceleration via multiple wheel events |
+| `humanizer_idle` | Simulate idle behavior with mouse micro-jitter and occasional micro-scrolls to defeat idle detection |
+
+All tools require `target_id` from a prior `interceptor_chrome_launch`. The engine maintains tracked mouse position across calls, so `humanizer_move` followed by `humanizer_click` produces a continuous path.
+
+**Behavioral details:**
+- **Mouse paths**: Cubic Bezier curves with random control points, Fitts's law distance/size scaling, optional overshoot + correction arc
+- **Typing**: Base delay from WPM, modified by bigram frequency (common pairs like "th" are faster), shift key penalty, word-boundary pauses. Optional typo injection uses QWERTY neighbor map with backspace correction
+- **Scrolling**: Total delta distributed across multiple wheel events following easeInOutQuad velocity curve
+- **Idle**: Periodic micro-jitter (±3px subtle / ±8px normal) and random micro-scrolls at configurable intensity
+
 ## Resources
 
 | URI | Description |
@@ -492,6 +521,13 @@ proxy_set_fingerprint_spoof --preset chrome_136 --host_patterns '["example.com"]
 interceptor_chrome_launch --url "https://example.com"       # With spoof active → stealth mode auto-enabled
 proxy_list_fingerprint_presets                  # Available browser presets
 
+# Human-like browser interaction (requires interceptor_chrome_launch target)
+humanizer_move --target_id "chrome_<pid>" --x 500 --y 300
+humanizer_click --target_id "chrome_<pid>" --selector "#login-button"
+humanizer_type --target_id "chrome_<pid>" --text "user@example.com" --wpm 45
+humanizer_scroll --target_id "chrome_<pid>" --delta_y 300
+humanizer_idle --target_id "chrome_<pid>" --duration_ms 2000 --intensity subtle
+
 # Query/export recorded session
 proxy_list_sessions
 proxy_query_session --session_id SESSION_ID --hostname_contains "api.example.com"
@@ -507,6 +543,7 @@ proxy_export_har --session_id SESSION_ID
 - **TLS capture**: Client JA3/JA4 from mockttp socket metadata; server JA3S via `tls.connect` monkey-patch
 - **TLS spoofing**: curl-impersonate in a Docker/Podman container (BoringSSL + nghttp2); container started lazily on first spoofed request
 - **Interceptors**: Managed by `InterceptorManager`, each type registers independently
+- **Humanizer**: Singleton `HumanizerEngine` with persistent `CdpSession` per Chrome target, tracks mouse position across calls. Pure TypeScript — no external deps (Bezier paths, Fitts's law, bigram timing all computed internally)
 
 ## Testing
 
