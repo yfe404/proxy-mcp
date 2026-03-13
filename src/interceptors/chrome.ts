@@ -15,7 +15,6 @@ import {
   getCdpTargetsUrl, getCdpTargets, getCdpVersion, getCdpVersionUrl, getCdpBaseUrl,
   waitForCdpVersion, CdpSession,
 } from "../cdp-utils.js";
-import { buildUserAgentMetadata, deriveNavigatorPlatformFromUA } from "../spoof-headers.js";
 
 interface LaunchedBrowser {
   target: ActiveTarget;
@@ -134,11 +133,10 @@ export class ChromeInterceptor implements Interceptor {
 
     const chromeLauncher = await import("chrome-launcher");
 
-    // Override User-Agent if fingerprint spoofing provides one. This sets both
-    // the HTTP User-Agent header and navigator.userAgent so in-page bot sensors
-    // see an identity consistent with the spoofed TLS fingerprint.
-    const spoofUserAgent = options.spoofUserAgent as string | undefined;
-    const stealthMode = !!spoofUserAgent;
+    // Stealth mode: minimal flags + stealth script, but NO User-Agent override.
+    // Chrome keeps its real UA so bot sensors see capabilities matching the
+    // actual browser version.
+    const stealthMode = !!options.stealthMode;
 
     // In stealth mode, start from a curated minimal flag set to avoid
     // detectable artifacts (e.g. --disable-extensions removes chrome.runtime).
@@ -164,10 +162,6 @@ export class ChromeInterceptor implements Interceptor {
       flags.push("--incognito");
     }
 
-    if (spoofUserAgent) {
-      flags.push(`--user-agent=${spoofUserAgent}`);
-    }
-
     // Resolve browser path for non-standard Chrome variants
     let chromePath: string | undefined;
     if (browser) {
@@ -187,10 +181,10 @@ export class ChromeInterceptor implements Interceptor {
       // "chrome" or unknown — let chrome-launcher find it
     }
 
-    // When spoofing, launch to about:blank first so the CDP identity override
-    // is in place before the real page loads any scripts.
-    const needsCdpOverride = !!spoofUserAgent;
-    const launchUrl = needsCdpOverride ? "about:blank" : (url ?? "about:blank");
+    // When in stealth mode, launch to about:blank first so the CDP stealth
+    // script is injected before the real page loads any scripts.
+    const needsCdpSetup = stealthMode;
+    const launchUrl = needsCdpSetup ? "about:blank" : (url ?? "about:blank");
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const launchOptions: any = {
@@ -222,11 +216,10 @@ export class ChromeInterceptor implements Interceptor {
       // Ignore and let users call interceptor_chrome_cdp_info for retries
     }
 
-    // ── Persistent CDP identity override ──
+    // ── CDP stealth setup ──
     let cdpSession: CdpSession | null = null;
-    let identityOverrideActive = false;
 
-    if (needsCdpOverride) {
+    if (needsCdpSetup) {
       try {
         // Wait for CDP to be fully ready
         await waitForCdpVersion(chrome.port, { timeoutMs: 5000 });
@@ -241,37 +234,19 @@ export class ChromeInterceptor implements Interceptor {
           const pageWsUrl = pageTarget.webSocketDebuggerUrl as string;
           cdpSession = await CdpSession.open(pageWsUrl, { timeoutMs: 3000 });
 
-          // Build override params from the spoof UA
-          const uaMetadata = buildUserAgentMetadata(spoofUserAgent!);
-          const navigatorPlatform = deriveNavigatorPlatformFromUA(spoofUserAgent!);
-
-          const overrideParams: Record<string, unknown> = {
-            userAgent: spoofUserAgent,
-            platform: navigatorPlatform,
-          };
-          if (uaMetadata) {
-            overrideParams.userAgentMetadata = uaMetadata;
-          }
-
-          await cdpSession.send("Emulation.setUserAgentOverride", overrideParams);
-          identityOverrideActive = true;
-
           // Inject stealth patches before any page script runs
-          if (stealthMode) {
-            await cdpSession.send("Page.addScriptToEvaluateOnNewDocument", {
-              source: STEALTH_SCRIPT,
-            });
-          }
+          await cdpSession.send("Page.addScriptToEvaluateOnNewDocument", {
+            source: STEALTH_SCRIPT,
+          });
 
-          // Navigate via the same persistent session so the emulation
-          // override isn't disrupted by a second DevTools connection.
+          // Navigate via the same persistent session so the stealth script
+          // isn't disrupted by a second DevTools connection.
           if (url) {
             await cdpSession.send("Page.navigate", { url }, { timeoutMs: 5000 });
           }
         }
       } catch {
-        // CDP override failed — Chrome still launched with --user-agent flag
-        // providing partial coverage. Log the failure in details below.
+        // CDP setup failed — Chrome still launched with stealth flags.
         if (cdpSession && !cdpSession.closed) {
           cdpSession.close();
           cdpSession = null;
@@ -294,7 +269,7 @@ export class ChromeInterceptor implements Interceptor {
         cdpVersionUrl,
         cdpTargetsUrl,
         browserWebSocketDebuggerUrl,
-        ...(spoofUserAgent ? { identityOverrideActive } : {}),
+        ...(stealthMode ? { stealthMode: true } : {}),
       },
     };
 

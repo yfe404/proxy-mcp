@@ -1085,7 +1085,7 @@ export class ProxyManager {
                 // header modification.  Returning modified headers from beforeRequest
                 // changes how mockttp processes the upstream connection and can break
                 // TLS handshakes with strict servers (e.g. Akamai edge CDNs).
-                // The browser's --user-agent flag already ensures a consistent UA.
+                // The browser uses its real UA; sub-resource UA is handled elsewhere.
                 return {};
               }
             }

@@ -154,10 +154,10 @@ export function registerInterceptorTools(server: McpServer): void {
       try {
         const proxyInfo = requireProxy();
 
-        // If fingerprint spoofing is active, pass the UA so Chrome launches with
-        // --user-agent flag. This overrides both the HTTP User-Agent header and
-        // navigator.userAgent, keeping in-page bot sensors consistent with the
-        // spoofed TLS fingerprint identity.
+        // If fingerprint spoofing is active, enable stealth mode: minimal flags,
+        // stealth script injection, but NO User-Agent override. Chrome keeps its
+        // real UA so in-page bot sensors (Kasada, Akamai) see capabilities that
+        // match the actual browser version.
         const spoofConfig = proxyManager.getJa3SpoofConfig();
 
         const result = await interceptorManager.activate("chrome", {
@@ -165,7 +165,7 @@ export function registerInterceptorTools(server: McpServer): void {
           url,
           browser,
           incognito,
-          spoofUserAgent: spoofConfig?.userAgent,
+          stealthMode: !!spoofConfig,
         });
         return {
           content: [{
