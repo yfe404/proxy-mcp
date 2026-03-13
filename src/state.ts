@@ -1066,7 +1066,7 @@ export class ProxyManager {
             // Advanced bot detectors (Kasada, Akamai) cross-validate TLS
             // fingerprints across all requests to the same domain. If the
             // document loads via Chrome's native TLS but the telemetry POST
-            // goes through curl-impersonate, the JA3 mismatch triggers
+            // goes through impit, the JA3 mismatch triggers
             // rejection. Letting same-origin requests share Chrome's native
             // TLS connection keeps fingerprints consistent.
             const headers = req.headers as Record<string, string>;
@@ -1095,7 +1095,7 @@ export class ProxyManager {
 
             try {
               // Extract cookies from the intercepted request's cookie header.
-              // Forwarded to curl-impersonate for cookie jar parity.
+              // Forwarded to impit for cookie jar parity.
               let cookies: { [key: string]: string } | undefined;
               const cookieHeader = (req.headers as Record<string, string>)["cookie"];
               if (cookieHeader) {
@@ -1108,7 +1108,7 @@ export class ProxyManager {
                 }
               }
 
-              // Resolve upstream proxy for this request so curl-impersonate
+              // Resolve upstream proxy for this request so impit
               // routes through the same upstream chain as non-spoofed traffic.
               let upstreamProxy: string | undefined;
               if (proxyConfig) {
@@ -1150,7 +1150,7 @@ export class ProxyManager {
                   statusCode: result.status,
                   headers: result.headers,
                   // Use rawBody so mockttp doesn't auto content-encode based on Content-Encoding.
-                  // curl-impersonate already returns the bytes as received from the origin.
+                  // impit already returns the bytes as received from the origin.
                   rawBody: result.body,
                 },
               };

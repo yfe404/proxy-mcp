@@ -7,7 +7,7 @@ proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It 
 ### Boundaries
 
 - Only sees traffic **configured to route through it** (not a network tap or packet sniffer)
-- Spoofs **outgoing JA3 + HTTP/2 fingerprint + header order** (via curl-impersonate in Docker/Podman), not JA4 (JA4 is capture-only)
+- Spoofs **outgoing JA3 + HTTP/2 fingerprint + header order** (via impit — native Rust TLS impersonation), not JA4 (JA4 is capture-only)
 - Can add, overwrite, or delete HTTP headers; outgoing header **order** can be controlled via fingerprint spoofing
 - Returns its own CA certificate — does **not** expose upstream server certificate chains
 
@@ -23,7 +23,7 @@ Use CDP/Playwright for browser internals (DOM, JS execution, localStorage, cooki
 | Modify requests in-flight (headers, body, mock, drop) | Via route/intercept handlers | Yes (declarative rules, hot-reload) |
 | Upstream proxy chaining (geo, auth) | Single browser via `--proxy-server` | Global + per-host upstreams across all clients (SOCKS4/5, HTTP, HTTPS, PAC) |
 | TLS fingerprint capture (JA3/JA4/JA3S) | No | Yes |
-| JA3 + HTTP/2 fingerprint spoofing | No | Proxy-side only (curl-impersonate re-issues matching requests with spoofed TLS 1.3, HTTP/2 frames, and header order; does not alter the client's TLS handshake) |
+| JA3 + HTTP/2 fingerprint spoofing | No | Proxy-side only (impit re-issues matching requests with spoofed TLS 1.3, HTTP/2 frames, and header order; does not alter the client's TLS handshake) |
 | Intercept non-browser traffic (curl, Python, Android apps) | No | Yes (interceptors) |
 | Human-like mouse/keyboard/scroll input | Via Playwright `page.mouse`/`page.keyboard` (instant, detectable timing) | Yes — CDP humanizer with Bezier curves, Fitts's law, WPM typing, eased scrolling |
 
@@ -195,7 +195,7 @@ Note: imported HAR entries (and entries created by `proxy_replay_session`) do no
 ### Prerequisites
 
 - Node.js 22+
-- Docker or Podman (required for TLS fingerprint spoofing)
+- impit (bundled — native TLS fingerprint spoofing, no Docker required)
 
 ### Install & build
 
@@ -330,14 +330,14 @@ proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
 | `proxy_get_tls_fingerprints` | Get JA3/JA4 client fingerprints + JA3S for a single exchange |
 | `proxy_list_tls_fingerprints` | List unique JA3/JA4 fingerprints across all traffic with counts |
 | `proxy_set_ja3_spoof` | Legacy: enable JA3 spoofing (deprecated, use `proxy_set_fingerprint_spoof`) |
-| `proxy_clear_ja3_spoof` | Disable fingerprint spoofing and stop curl-impersonate container |
+| `proxy_clear_ja3_spoof` | Disable fingerprint spoofing |
 | `proxy_get_tls_config` | Return current TLS config (server capture, JA3 spoof state) |
 | `proxy_enable_server_tls_capture` | Toggle server-side JA3S capture (monkey-patches `tls.connect`) |
-| `proxy_set_fingerprint_spoof` | Enable full TLS + HTTP/2 fingerprint spoofing via curl-impersonate in Docker/Podman. Supports browser presets. |
+| `proxy_set_fingerprint_spoof` | Enable full TLS + HTTP/2 fingerprint spoofing via impit. Supports browser presets. |
 | `proxy_list_fingerprint_presets` | List available browser fingerprint presets (e.g. `chrome_131`, `chrome_136`, `chrome_136_linux`, `firefox_133`) |
-| `proxy_check_fingerprint_runtime` | Preflight Docker/Podman readiness for fingerprint spoofing (runtime health, image/container presence) |
+| `proxy_check_fingerprint_runtime` | Check fingerprint spoofing backend readiness |
 
-Fingerprint spoofing works by re-issuing the request from the proxy via curl-impersonate running in a Docker or Podman container. curl-impersonate uses BoringSSL + nghttp2 (the same TLS and HTTP/2 libraries as Chrome), so TLS 1.3 and HTTP/2 fingerprints (SETTINGS, WINDOW_UPDATE, PRIORITY frames) match real browsers by construction. The origin server sees the proxy's spoofed TLS, HTTP/2, and header order — not the original client's. When a `user_agent` is set (including via presets), proxy-mcp also normalizes Chromium UA Client Hints headers (`sec-ch-ua*`) to match the spoofed User-Agent (forwarding contradictory hints is a common bot signal). **Chrome browser exception:** when Chrome is launched via `interceptor_chrome_launch`, document loads and same-origin requests use Chrome's native TLS (no curl-impersonate), preserving fingerprint consistency for bot detection challenges. Only cross-origin sub-resource requests are re-issued with spoofed TLS. Non-browser clients (curl, spawn, HAR replay) get full TLS + UA spoofing on all requests. Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup. `proxy_set_ja3_spoof` is kept for backward compatibility but custom JA3 strings are ignored (the preset's curl-impersonate target is used instead). JA4 fingerprints are captured (read-only) but spoofing is not supported.
+Fingerprint spoofing works by re-issuing the request from the proxy via impit (native Rust TLS/HTTP2 impersonation via rustls). TLS 1.3 and HTTP/2 fingerprints (SETTINGS, WINDOW_UPDATE, PRIORITY frames) match real browsers by construction. The origin server sees the proxy's spoofed TLS, HTTP/2, and header order — not the original client's. When a `user_agent` is set (including via presets), proxy-mcp also normalizes Chromium UA Client Hints headers (`sec-ch-ua*`) to match the spoofed User-Agent (forwarding contradictory hints is a common bot signal). **Chrome browser exception:** when Chrome is launched via `interceptor_chrome_launch`, document loads and same-origin requests use Chrome's native TLS (no impit), preserving fingerprint consistency for bot detection challenges. Only cross-origin sub-resource requests are re-issued with spoofed TLS. Non-browser clients (curl, spawn, HAR replay) get full TLS + UA spoofing on all requests. Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup. `proxy_set_ja3_spoof` is kept for backward compatibility but custom JA3 strings are ignored (the preset's impit browser target is used instead). JA4 fingerprints are captured (read-only) but spoofing is not supported.
 
 ### Interceptors (18)
 
@@ -362,7 +362,7 @@ Interceptors configure targets (browsers, processes, devices, containers) to rou
 
 Launches with isolated temp profile, auto-cleaned on close. Supports `chrome`, `chromium`, `brave`, `edge`.
 
-When fingerprint spoofing is active (`proxy_set_fingerprint_spoof`), Chrome launches in **stealth mode**: chrome-launcher's default flags that create detectable artifacts (e.g. `--disable-extensions` removing `chrome.runtime`) are replaced with a curated minimal set, and anti-detection patches are injected via CDP before any page scripts run. This covers `navigator.webdriver`, `chrome.runtime` presence, `Permissions.query`, and Error stack sanitization. Chrome keeps its **real User-Agent** (no UA override) so that bot detection JS (Kasada, Akamai) sees browser capabilities matching the actual Chrome version. Same-origin sub-resource requests also bypass curl-impersonate to maintain TLS fingerprint consistency within each domain — only cross-origin requests are re-issued with spoofed TLS.
+When fingerprint spoofing is active (`proxy_set_fingerprint_spoof`), Chrome launches in **stealth mode**: chrome-launcher's default flags that create detectable artifacts (e.g. `--disable-extensions` removing `chrome.runtime`) are replaced with a curated minimal set, and anti-detection patches are injected via CDP before any page scripts run. This covers `navigator.webdriver`, `chrome.runtime` presence, `Permissions.query`, and Error stack sanitization. Chrome keeps its **real User-Agent** (no UA override) so that bot detection JS (Kasada, Akamai) sees browser capabilities matching the actual Chrome version. Same-origin sub-resource requests also bypass impit to maintain TLS fingerprint consistency within each domain — only cross-origin requests are re-issued with spoofed TLS.
 
 #### Terminal / Process (2)
 
@@ -541,7 +541,7 @@ proxy_export_har --session_id SESSION_ID
 - **Traffic capture**: `on('request')` + `on('response')` events, correlated by request ID
 - **Ring buffer**: 1000 entries max, body previews capped at 4KB
 - **TLS capture**: Client JA3/JA4 from mockttp socket metadata; server JA3S via `tls.connect` monkey-patch
-- **TLS spoofing**: curl-impersonate in a Docker/Podman container (BoringSSL + nghttp2); container started lazily on first spoofed request
+- **TLS spoofing**: impit (native Rust TLS/HTTP2 impersonation via rustls); in-process, no container needed
 - **Interceptors**: Managed by `InterceptorManager`, each type registers independently
 - **Humanizer**: Singleton `HumanizerEngine` with persistent `CdpSession` per Chrome target, tracks mouse position across calls. Pure TypeScript — no external deps (Bezier paths, Fitts's law, bigram timing all computed internally)
 
@@ -551,7 +551,7 @@ proxy_export_har --session_id SESSION_ID
 npm test              # All tests (unit + integration)
 npm run test:unit     # Unit tests only
 npm run test:integration  # Integration tests
-npm run test:e2e      # E2E fingerprint tests (requires Docker or Podman + Chrome + internet)
+npm run test:e2e      # E2E fingerprint tests (requires Chrome + internet)
 ```
 
 ## Credits
@@ -561,10 +561,9 @@ npm run test:e2e      # E2E fingerprint tests (requires Docker or Podman + Chrom
 | Project | Role |
 |---------|------|
 | [mockttp](https://github.com/httptoolkit/mockttp) | MITM proxy engine, rule system, CA generation |
-| [curl-impersonate](https://github.com/lexiforest/curl-impersonate) | TLS/HTTP2 fingerprint spoofing via BoringSSL + nghttp2 in Docker/Podman |
+| [impit](https://github.com/yfe404/impit) | Native TLS/HTTP2 fingerprint impersonation (Rust via NAPI-RS) |
 | [frida-js](https://github.com/AeonLucid/frida-js) | Pure-JS Frida client for Android instrumentation |
 | [chrome-launcher](https://github.com/nicolo-ribaudo/chrome-launcher) | Chrome/Chromium process management |
-| [dockerode](https://github.com/apocas/dockerode) | Docker API client |
 | [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) | MCP server framework |
 
 ### Vendored Frida Scripts

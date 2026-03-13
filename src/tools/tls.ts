@@ -111,9 +111,9 @@ export function registerTlsTools(server: McpServer): void {
   // ── Set JA3 spoof (legacy — kept for backward compat) ──
   server.tool(
     "proxy_set_ja3_spoof",
-    "Legacy: enable JA3 spoofing (deprecated, use proxy_set_fingerprint_spoof). Custom JA3 strings are ignored by the curl-impersonate backend; the request will use the default Chrome preset.",
+    "Legacy: enable JA3 spoofing (deprecated, use proxy_set_fingerprint_spoof). Custom JA3 strings are ignored by the impit backend; the request will use the default Chrome preset.",
     {
-      ja3: z.string().describe("JA3 fingerprint string (ignored by curl-impersonate backend — use proxy_set_fingerprint_spoof with a preset instead)"),
+      ja3: z.string().describe("JA3 fingerprint string (ignored by impit backend — use proxy_set_fingerprint_spoof with a preset instead)"),
       user_agent: z.string().optional().describe("User-Agent header to use with spoofed requests"),
       host_patterns: z.array(z.string()).optional().describe("Only spoof requests to hostnames containing these substrings. Empty = spoof all HTTPS."),
     },
@@ -130,7 +130,7 @@ export function registerTlsTools(server: McpServer): void {
             type: "text" as const,
             text: JSON.stringify({
               status: "success",
-              message: "JA3 spoofing enabled (note: custom JA3 strings are not supported by the curl-impersonate backend; the default Chrome preset fingerprint will be used instead. Use proxy_set_fingerprint_spoof with a preset for explicit control.)",
+              message: "JA3 spoofing enabled (note: custom JA3 strings are not supported by the impit backend; the default Chrome preset fingerprint will be used instead. Use proxy_set_fingerprint_spoof with a preset for explicit control.)",
               config: { ja3, userAgent: user_agent, hostPatterns: host_patterns ?? [] },
             }),
           }],
@@ -144,7 +144,7 @@ export function registerTlsTools(server: McpServer): void {
   // ── Set full fingerprint spoof ──
   server.tool(
     "proxy_set_fingerprint_spoof",
-    "Enable outgoing TLS + HTTP/2 fingerprint spoofing via curl-impersonate (requires Docker or Podman). Supports browser presets that select a curl-impersonate target binary (BoringSSL + nghttp2, matching real Chrome/Firefox). Individual parameters override preset values.",
+    "Enable outgoing TLS + HTTP/2 fingerprint spoofing via impit (native TLS impersonation, no Docker required). Supports browser presets that select an impit target (rustls, matching real Chrome/Firefox). Individual parameters override preset values.",
     {
       preset: z.string().optional().describe("Browser preset name (e.g. 'chrome_131', 'chrome_136'). Use proxy_list_fingerprint_presets to see available options. Individual params below override preset values."),
       ja3: z.string().optional().describe("JA3 fingerprint string. Required if no preset is given."),
@@ -200,7 +200,7 @@ export function registerTlsTools(server: McpServer): void {
 
         const warnings: string[] = [];
         if (!preset && ja3) {
-          warnings.push("Custom JA3 strings are not supported by the curl-impersonate backend. The default Chrome preset fingerprint will be used. Use a preset for explicit control.");
+          warnings.push("Custom JA3 strings are not supported by the impit backend. The default Chrome preset fingerprint will be used. Use a preset for explicit control.");
         }
 
         return {
@@ -241,7 +241,7 @@ export function registerTlsTools(server: McpServer): void {
   // ── Check fingerprint spoof runtime readiness ──
   server.tool(
     "proxy_check_fingerprint_runtime",
-    "Check Docker/Podman runtime readiness for TLS/HTTP2 fingerprint spoofing without sending traffic.",
+    "Check fingerprint spoofing backend readiness without sending traffic.",
     {},
     async () => {
       try {
@@ -261,7 +261,7 @@ export function registerTlsTools(server: McpServer): void {
   // ── Clear JA3 spoof ──
   server.tool(
     "proxy_clear_ja3_spoof",
-    "Disable fingerprint spoofing and stop curl-impersonate container.",
+    "Disable fingerprint spoofing.",
     {},
     async () => {
       try {

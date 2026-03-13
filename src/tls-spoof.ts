@@ -1,181 +1,13 @@
 /**
- * curl-impersonate wrapper for TLS + HTTP/2 fingerprint spoofing.
+ * TLS + HTTP/2 fingerprint spoofing via impit (native Rust NAPI module).
  *
- * Runs curl-impersonate inside a long-lived Docker/Podman container
- * (debian:bookworm-slim based image with pre-installed binaries from
- * the lexiforest/curl-impersonate fork). Requests are issued via
- * `docker exec`/`podman exec`.
- *
- * Replaces the former CycleTLS backend — curl-impersonate uses BoringSSL +
- * nghttp2 (same libs as Chrome), so TLS 1.3 and HTTP/2 fingerprints match
- * real browsers by construction.
+ * Replaces the former Docker/curl-impersonate backend with a direct in-process
+ * call to impit's fetch(), which handles TLS fingerprinting, HTTP/2 frame
+ * ordering, and header normalization natively via rustls.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { Impit } from "impit";
 import { resolveBrowserPreset } from "./browser-presets.js";
-
-const execFileAsync = promisify(execFile);
-
-// Detect a usable container runtime: prefer docker, fall back to podman.
-let _containerCli: string | null = null;
-
-type ExecResult = { stdout: Buffer; stderr: Buffer };
-type RuntimeProbe = {
-  name: string;
-  available: boolean;
-  operational: boolean;
-  version?: string;
-  error?: string;
-};
-type ImageInspectResult = { name: string; exists: boolean; error?: string };
-type ContainerInspectResult = {
-  name: string;
-  exists: boolean;
-  running: boolean;
-  id?: string;
-  error?: string;
-};
-
-function toBuffer(data: Buffer | string): Buffer {
-  return Buffer.isBuffer(data) ? data : Buffer.from(data, "utf-8");
-}
-
-function stringifyExecError(error: unknown): string {
-  if (!error || typeof error !== "object") return String(error);
-  const err = error as { message?: string; stderr?: Buffer | string; stdout?: Buffer | string };
-  const parts: string[] = [];
-  if (err.message) parts.push(err.message);
-  if (err.stderr) {
-    const stderr = toBuffer(err.stderr).toString("utf-8").trim();
-    if (stderr) parts.push(stderr);
-  }
-  if (err.stdout) {
-    const stdout = toBuffer(err.stdout).toString("utf-8").trim();
-    if (stdout) parts.push(stdout);
-  }
-  return parts.join(" | ");
-}
-
-function parseVersionText(stdout: Buffer, stderr: Buffer): string | undefined {
-  const text = `${stdout.toString("utf-8")}\n${stderr.toString("utf-8")}`.trim();
-  if (!text) return undefined;
-  const line = text.split(/\r?\n/)[0]?.trim();
-  return line || undefined;
-}
-
-function isNotFoundErrorMessage(message: string): boolean {
-  const msg = message.toLowerCase();
-  return (
-    msg.includes("no such object")
-    || msg.includes("no such container")
-    || msg.includes("unable to find image")
-    || msg.includes("not found")
-  );
-}
-
-async function execContainerCli(
-  cli: string,
-  args: string[],
-  opts?: { timeout?: number; maxBuffer?: number },
-): Promise<ExecResult> {
-  const { stdout, stderr } = await execFileAsync(cli, args, {
-    timeout: opts?.timeout ?? 60_000,
-    maxBuffer: opts?.maxBuffer ?? 50 * 1024 * 1024,
-    encoding: "buffer",
-  });
-  return { stdout: toBuffer(stdout), stderr: toBuffer(stderr) };
-}
-
-async function probeRuntime(cli: string): Promise<RuntimeProbe> {
-  let version: string | undefined;
-  try {
-    const { stdout, stderr } = await execContainerCli(cli, ["--version"], {
-      timeout: 5_000,
-      maxBuffer: 1 * 1024 * 1024,
-    });
-    version = parseVersionText(stdout, stderr);
-  } catch {
-    return { name: cli, available: false, operational: false, error: "binary not found on PATH" };
-  }
-
-  try {
-    await execContainerCli(cli, ["info"], { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
-    return { name: cli, available: true, operational: true, version };
-  } catch (error) {
-    return {
-      name: cli,
-      available: true,
-      operational: false,
-      version,
-      error: stringifyExecError(error) || "runtime not operational",
-    };
-  }
-}
-
-async function inspectContainerByName(cli: string, name: string): Promise<ContainerInspectResult> {
-  try {
-    const { stdout } = await execContainerCli(
-      cli,
-      ["container", "inspect", name, "--format", "{{.Id}}|{{.State.Running}}"],
-      { timeout: 10_000, maxBuffer: 2 * 1024 * 1024 },
-    );
-    const line = stdout.toString("utf-8").trim();
-    if (!line) return { name, exists: false, running: false, error: "empty inspect output" };
-
-    const [idRaw, runningRaw] = line.split("|");
-    if (!idRaw) return { name, exists: false, running: false, error: "invalid inspect output" };
-
-    return {
-      name,
-      exists: true,
-      running: runningRaw?.trim() === "true",
-      id: idRaw.trim(),
-    };
-  } catch (error) {
-    const message = stringifyExecError(error);
-    if (isNotFoundErrorMessage(message)) return { name, exists: false, running: false };
-    return { name, exists: false, running: false, error: message || String(error) };
-  }
-}
-
-async function inspectImageByName(cli: string, name: string): Promise<ImageInspectResult> {
-  try {
-    await execContainerCli(cli, ["image", "inspect", name], { timeout: 20_000, maxBuffer: 4 * 1024 * 1024 });
-    return { name, exists: true };
-  } catch (error) {
-    const message = stringifyExecError(error);
-    if (isNotFoundErrorMessage(message)) return { name, exists: false };
-    return { name, exists: false, error: message || String(error) };
-  }
-}
-
-async function containerCli(): Promise<string> {
-  if (_containerCli) return _containerCli;
-
-  const failures: string[] = [];
-  for (const bin of ["docker", "podman"]) {
-    const usable = await probeRuntime(bin);
-    if (usable.operational) {
-      _containerCli = bin;
-      return bin;
-    }
-    failures.push(`${bin}: ${usable.error ?? "runtime not operational"}`);
-  }
-
-  throw new Error(
-    `No usable container runtime found (docker/podman). Checked: ${failures.join("; ")}`
-  );
-}
-
-const IMAGE_NAME = "proxy-mcp-curl-impersonate";
-const CONTAINER_NAME = "proxy-mcp-curl-impersonate";
-const DEFAULT_CURL_BINARY = "chrome131";
-
-let containerId: string | null = null;
-let initPromise: Promise<string> | null = null;
 
 // ── Public types ──
 
@@ -189,199 +21,24 @@ export interface SpoofOptions {
   method: string;
   headers?: Record<string, string>;
   body?: string;
-  ja3: string;              // kept for backward compat (ignored by curl-impersonate)
+  ja3: string;              // kept for backward compat (ignored — preset handles TLS)
   userAgent?: string;
   proxy?: string;
-  http2Fingerprint?: string; // kept for backward compat (ignored by curl-impersonate)
-  headerOrder?: string[];
-  orderAsProvided?: boolean;
-  disableGrease?: boolean;
+  http2Fingerprint?: string; // kept for backward compat (ignored — preset handles HTTP/2)
+  headerOrder?: string[];    // ignored by impit (preset handles HTTP/2 pseudo-header order)
+  orderAsProvided?: boolean; // ignored
+  disableGrease?: boolean;   // ignored (preset controls GREASE)
   disableRedirect?: boolean;
-  forceHTTP1?: boolean;
+  forceHTTP1?: boolean;      // ignored (impit has no equivalent)
   insecureSkipVerify?: boolean;
   cookies?: Array<object> | { [key: string]: string };
-  preset?: string;          // browser preset name → selects curlBinary
+  preset?: string;           // browser preset name → selects impitBrowser
 }
 
 export interface FingerprintRuntimeCheck {
   status: "success";
   ready: boolean;
-  runtime: {
-    selected: string | null;
-    recommended: string | null;
-    cached: string | null;
-    cacheStale: boolean;
-  };
-  inspectedWithRuntime: string | null;
-  runtimes: RuntimeProbe[];
-  image: ImageInspectResult;
-  container: ContainerInspectResult;
-}
-
-/**
- * Probe Docker/Podman readiness for fingerprint spoofing without sending traffic.
- */
-export async function checkSpoofRuntime(): Promise<FingerprintRuntimeCheck> {
-  const runtimes = await Promise.all(["docker", "podman"].map((name) => probeRuntime(name)));
-  const recommended = runtimes.find((r) => r.operational)?.name ?? null;
-  const cached = _containerCli;
-  const selected = cached ?? recommended;
-  const cacheStale = !!cached && !runtimes.some((r) => r.name === cached && r.operational);
-  const inspectRuntime = (!cacheStale ? selected : recommended) ?? null;
-
-  let image: ImageInspectResult = { name: IMAGE_NAME, exists: false };
-  let container: ContainerInspectResult = { name: CONTAINER_NAME, exists: false, running: false };
-  if (inspectRuntime) {
-    [image, container] = await Promise.all([
-      inspectImageByName(inspectRuntime, IMAGE_NAME),
-      inspectContainerByName(inspectRuntime, CONTAINER_NAME),
-    ]);
-  }
-
-  return {
-    status: "success",
-    ready: !!selected && runtimes.some((r) => r.name === selected && r.operational),
-    runtime: { selected, recommended, cached, cacheStale },
-    inspectedWithRuntime: inspectRuntime,
-    runtimes,
-    image,
-    container,
-  };
-}
-
-// ── Container lifecycle ──
-
-function getProjectRoot(): string {
-  const thisFile = fileURLToPath(import.meta.url);
-  // Works from both src/ (dev) and dist/ (built)
-  return path.resolve(path.dirname(thisFile), "..");
-}
-
-/**
- * Build the curl-impersonate Docker image if not present,
- * start the container if not running. Returns the container ID.
- */
-async function ensureSpoofContainer(): Promise<string> {
-  if (containerId) return containerId;
-
-  if (!initPromise) {
-    initPromise = (async () => {
-      const cli = await containerCli();
-
-      const existing = await inspectContainerByName(cli, CONTAINER_NAME);
-      if (existing.exists) {
-        if (!existing.running) {
-          await execContainerCli(cli, ["container", "start", CONTAINER_NAME], { timeout: 30_000 });
-        }
-        const current = await inspectContainerByName(cli, CONTAINER_NAME);
-        if (!current.exists) {
-          throw new Error(`Container '${CONTAINER_NAME}' disappeared after start`);
-        }
-        containerId = current.id ?? existing.id ?? null;
-        if (!containerId) {
-          throw new Error(`Could not resolve container ID for '${CONTAINER_NAME}'`);
-        }
-        return containerId;
-      }
-
-      // Build image if not present
-      const image = await inspectImageByName(cli, IMAGE_NAME);
-      if (!image.exists) {
-        if (image.error) throw new Error(`Failed to inspect image '${IMAGE_NAME}': ${image.error}`);
-        const projectRoot = getProjectRoot();
-        const dockerfilePath = path.join(projectRoot, "Dockerfile.curl-impersonate");
-        await execContainerCli(
-          cli,
-          ["build", "-f", dockerfilePath, "-t", IMAGE_NAME, projectRoot],
-          { timeout: 300_000, maxBuffer: 100 * 1024 * 1024 },
-        );
-      }
-
-      // Create and start container. Use default network mode for better
-      // compatibility across docker/podman/rootless setups.
-      try {
-        await execContainerCli(
-          cli,
-          ["run", "-d", "--name", CONTAINER_NAME, IMAGE_NAME, "sleep", "infinity"],
-          { timeout: 60_000 },
-        );
-      } catch (error) {
-        // Handle races where another request created the container first.
-        const msg = stringifyExecError(error).toLowerCase();
-        if (!msg.includes("already in use")) throw error;
-      }
-
-      const created = await inspectContainerByName(cli, CONTAINER_NAME);
-      if (!created.exists) {
-        throw new Error(`Container '${CONTAINER_NAME}' was not found after creation`);
-      }
-      if (!created.running) {
-        await execContainerCli(cli, ["container", "start", CONTAINER_NAME], { timeout: 30_000 });
-      }
-      containerId = created.id ?? null;
-      if (!containerId) {
-        throw new Error(`Could not resolve container ID for '${CONTAINER_NAME}' after creation`);
-      }
-      return containerId;
-    })().catch((error) => {
-      // Transient runtime failures should not poison future attempts.
-      containerId = null;
-      initPromise = null;
-      _containerCli = null;
-      throw error;
-    });
-  }
-
-  return initPromise;
-}
-
-// ── Response parsing ──
-
-/**
- * Parse HTTP response headers from curl's `-D /dev/stderr` output.
- * Handles multiple response blocks (redirects, 1xx informational) by
- * using the LAST block.
- */
-function parseResponseHeaders(headerBuf: Buffer): { status: number; headers: Record<string, string | string[]> } {
-  const text = headerBuf.toString("utf-8");
-  // Split into response blocks (each starts with HTTP/...)
-  const blocks = text.split(/(?=^HTTP\/)/m).filter((b) => b.trim().length > 0);
-  const lastBlock = blocks[blocks.length - 1] || "";
-  const lines = lastBlock.split(/\r?\n/);
-
-  let status = 200;
-  const headers: Record<string, string | string[]> = {};
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (i === 0) {
-      // Status line: "HTTP/2 200" or "HTTP/1.1 200 OK"
-      const match = line.match(/^HTTP\/[\d.]+\s+(\d+)/);
-      if (match) status = parseInt(match[1], 10);
-      continue;
-    }
-    const colonIdx = line.indexOf(":");
-    if (colonIdx > 0) {
-      const key = line.slice(0, colonIdx).trim().toLowerCase();
-      const value = line.slice(colonIdx + 1).trim();
-      // Set-Cookie must be kept as an array — combining with commas
-      // breaks cookie parsing (commas appear in Expires values).
-      if (key === "set-cookie") {
-        const existing = headers[key];
-        if (Array.isArray(existing)) {
-          existing.push(value);
-        } else if (typeof existing === "string") {
-          headers[key] = [existing, value];
-        } else {
-          headers[key] = [value];
-        }
-      } else {
-        headers[key] = value;
-      }
-    }
-  }
-
-  return { status, headers };
+  backend: string;
 }
 
 // ── Utilities (kept from original — still needed) ──
@@ -483,139 +140,96 @@ export function reorderHeaders(
 // ── Main request function ──
 
 /**
- * Make an HTTP request with a spoofed TLS + HTTP/2 fingerprint via
- * curl-impersonate running in a Docker container.
+ * Make an HTTP request with a spoofed TLS + HTTP/2 fingerprint via impit.
  */
 export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<SpoofedResponse> {
-  const cid = await ensureSpoofContainer();
-
-  // Determine which curl-impersonate target to use
-  let curlTarget = DEFAULT_CURL_BINARY;
+  // 1. Resolve preset → impit browser name
+  let browser: string = "chrome131";
   if (opts.preset) {
     try {
       const preset = resolveBrowserPreset(opts.preset);
-      curlTarget = preset.curlBinary;
-    } catch {
-      // Fall through to default
-    }
+      browser = preset.impitBrowser;
+    } catch { /* fall through to default */ }
   }
 
-  // Build the container exec command
-  const cli = await containerCli();
-  const args: string[] = [
-    "exec", cid,
-    "curl-impersonate",
-    "--impersonate", curlTarget,
-    "-s",                    // silent (no progress)
-    "-D", "/dev/stderr",     // response headers → stderr
-    "--compressed",          // handle content-encoding
-  ];
-
-  // Timeouts — fail fast on unreachable hosts instead of blocking
-  // for the full docker exec timeout. These don't alter the TLS fingerprint.
-  args.push("--connect-timeout", "15");
-  args.push("--max-time", "45");
-
-  // Cookies — forward via -b for explicit cookie jar behavior.
-  // Cookies also flow via -H "cookie: ..." from opts.headers; when -b is used
-  // the cookie header is stripped from -H to avoid duplication.
-  const hasCookies =
-    opts.cookies && typeof opts.cookies === "object" && !Array.isArray(opts.cookies);
-  if (hasCookies) {
-    const cookieStr = Object.entries(opts.cookies as Record<string, string>)
-      .map(([k, v]) => `${k}=${v}`)
-      .join("; ");
-    if (cookieStr) {
-      args.push("-b", cookieStr);
-    }
-  }
-
-  // Headers
-  const headers = opts.headers || {};
-  for (const [k, v] of Object.entries(headers)) {
-    // Skip cookie header when using -b flag (avoid duplication)
-    if (k.toLowerCase() === "cookie" && hasCookies) continue;
-    args.push("-H", `${k}: ${v}`);
-  }
-
-  // User-Agent override (if set, override the impersonation default)
-  if (opts.userAgent) {
-    args.push("-H", `user-agent: ${opts.userAgent}`);
-  }
-
-  // Method
-  const method = opts.method.toUpperCase();
-  if (method !== "GET") {
-    args.push("-X", method);
-  }
-
-  // Body
-  if (opts.body) {
-    args.push("--data-raw", opts.body);
-  }
-
-  // Proxy
-  if (opts.proxy) {
-    args.push("--proxy", opts.proxy);
-  }
-
-  // Redirects
-  if (!opts.disableRedirect) {
-    args.push("-L");           // follow redirects
-    args.push("--max-redirs", "10");
-  }
-
-  // TLS verification
-  if (opts.insecureSkipVerify) {
-    args.push("-k");
-  }
-
-  // Force HTTP/1.1
-  if (opts.forceHTTP1) {
-    args.push("--http1.1");
-  }
-
-  // URL must be last
-  args.push(url);
-
-  const { stdout, stderr } = await execContainerCli(cli, args, {
-    maxBuffer: 50 * 1024 * 1024,
-    timeout: 60_000,  // curl's own --max-time handles the actual limit
+  // 2. Build Impit instance (per-request — different proxy/preset combos)
+  const impit = new Impit({
+    browser: browser as any,
+    proxyUrl: opts.proxy,
+    ignoreTlsErrors: opts.insecureSkipVerify ?? false,
+    followRedirects: !opts.disableRedirect,
+    maxRedirects: opts.disableRedirect ? 0 : 10,
+    timeout: 45_000,
+    headers: opts.userAgent ? { "user-agent": opts.userAgent } : undefined,
   });
 
-  // Parse response headers from stderr
-  const { status, headers: responseHeaders } = parseResponseHeaders(stderr);
+  // 3. Merge cookies into headers
+  const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+  if (opts.cookies && typeof opts.cookies === "object" && !Array.isArray(opts.cookies)) {
+    const cookieStr = Object.entries(opts.cookies as Record<string, string>)
+      .map(([k, v]) => `${k}=${v}`).join("; ");
+    if (cookieStr) {
+      const existing = getHeader(headers, "cookie");
+      if (existing) {
+        headers["cookie"] = `${existing}; ${cookieStr}`;
+      } else {
+        headers["cookie"] = cookieStr;
+      }
+    }
+  }
 
-  // curl-impersonate with --compressed decompresses the body but keeps the
-  // original content-encoding/content-length headers. Strip them so the
-  // client doesn't try to decompress already-decompressed data.
+  // 4. Execute fetch
+  const method = opts.method.toUpperCase();
+  const response = await impit.fetch(url, {
+    method: method as any,
+    headers,
+    body: opts.body,
+  });
+
+  // 5. Convert response
+  const bodyBytes = await response.bytes();
+  const responseHeaders: Record<string, string | string[]> = {};
+
+  // Handle set-cookie as array (getSetCookie API)
+  const setCookies = (response.headers as any).getSetCookie?.();
+  if (setCookies && setCookies.length > 0) {
+    responseHeaders["set-cookie"] = setCookies;
+  }
+  for (const [key, value] of response.headers.entries()) {
+    const lk = key.toLowerCase();
+    if (lk === "set-cookie") continue; // already handled above
+    responseHeaders[lk] = value;
+  }
+
+  // Strip encoding headers (impit already decompresses)
   delete responseHeaders["content-length"];
   delete responseHeaders["transfer-encoding"];
   delete responseHeaders["content-encoding"];
 
-  return {
-    status,
-    headers: responseHeaders,
-    body: stdout,
-  };
+  return { status: response.status, headers: responseHeaders, body: Buffer.from(bodyBytes) };
+}
+
+// ── Runtime check ──
+
+/**
+ * Check fingerprint spoofing backend readiness.
+ */
+export async function checkSpoofRuntime(): Promise<FingerprintRuntimeCheck> {
+  try {
+    new Impit({ browser: "chrome131" as any });
+    return { status: "success", ready: true, backend: "impit-node" };
+  } catch {
+    return { status: "success", ready: false, backend: "impit-node" };
+  }
 }
 
 // ── Shutdown ──
 
 /**
- * Stop and remove the curl-impersonate Docker container.
- * Called when spoofing is disabled or proxy stops.
+ * No-op: impit is in-process, no container to shut down.
  */
 export async function shutdownSpoofContainer(): Promise<void> {
-  try {
-    const cli = await containerCli();
-    try { await execContainerCli(cli, ["container", "stop", "-t", "2", CONTAINER_NAME], { timeout: 10_000 }); } catch { /* may already be stopped */ }
-    try { await execContainerCli(cli, ["container", "rm", "-f", CONTAINER_NAME], { timeout: 10_000 }); } catch { /* may already be removed */ }
-  } catch {
-    // Ignore shutdown errors
-  }
-  containerId = null;
-  initPromise = null;
+  // No-op: impit is in-process, no container to shut down.
 }
 
 /**
