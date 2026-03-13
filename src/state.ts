@@ -1062,14 +1062,17 @@ export class ProxyManager {
             // Only spoof HTTPS requests matching host patterns
             if (!req.url.startsWith("https://")) return {};
 
-            // Skip spoofing for top-level navigation requests (document loads).
+            // Skip spoofing for document loads AND same-origin sub-resources.
             // Advanced bot detectors (Kasada, Akamai) cross-validate TLS
-            // fingerprints with JS browser data during challenge flows.
-            // Letting navigations go through mockttp's native TLS allows the
-            // real browser to solve JS challenges consistently, while API and
-            // resource requests still benefit from TLS spoofing.
-            const secFetchDest = (req.headers as Record<string, string>)["sec-fetch-dest"];
-            if (secFetchDest === "document") return {};
+            // fingerprints across all requests to the same domain. If the
+            // document loads via Chrome's native TLS but the telemetry POST
+            // goes through curl-impersonate, the JA3 mismatch triggers
+            // rejection. Letting same-origin requests share Chrome's native
+            // TLS connection keeps fingerprints consistent.
+            const headers = req.headers as Record<string, string>;
+            const secFetchDest = headers["sec-fetch-dest"];
+            const secFetchSite = headers["sec-fetch-site"];
+            if (secFetchDest === "document" || secFetchSite === "same-origin") return {};
 
             if (spoofConfig.hostPatterns && spoofConfig.hostPatterns.length > 0) {
               // req.hostname can be empty in HTTPS proxy mode; fall back to URL parsing
