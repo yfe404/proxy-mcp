@@ -1,21 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { reorderHeaders, responseDataToBuffer, stripHopByHopHeaders } from "../../src/tls-spoof.js";
-
-describe("reorderHeaders", () => {
-  it("orders specified headers first (case-insensitive) and preserves remaining order", () => {
-    const headers = {
-      "User-Agent": "ua",
-      "Accept": "*/*",
-      "X-Z": "1",
-      "Host": "example.com",
-      "X-A": "2",
-    };
-
-    const ordered = reorderHeaders(headers, ["host", "accept", "user-agent"]);
-    assert.deepEqual(Object.keys(ordered), ["Host", "Accept", "User-Agent", "X-Z", "X-A"]);
-  });
-});
+import { responseDataToBuffer, stripHopByHopHeaders } from "../../src/tls-spoof.js";
 
 describe("stripHopByHopHeaders", () => {
   it("removes hop-by-hop headers and headers listed in Connection", () => {
@@ -76,4 +61,3 @@ describe("responseDataToBuffer", () => {
     assert.equal(responseDataToBuffer(obj).toString("utf-8"), "[object Object]");
   });
 });
-

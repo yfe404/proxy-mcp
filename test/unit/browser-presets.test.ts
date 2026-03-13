@@ -13,10 +13,8 @@ describe("browser presets", () => {
   it("resolves a preset with required fields", () => {
     const preset = resolveBrowserPreset("chrome_136");
     assert.equal(preset.name, "chrome_136");
-    assert.ok(preset.ja3.length > 0);
     assert.ok(preset.userAgent.includes("Chrome/"));
-    assert.ok(preset.http2Fingerprint.includes("|"));
-    assert.ok(preset.headerOrder.length > 0);
+    assert.ok(preset.impitBrowser.length > 0);
   });
 
   it("throws for unknown presets", () => {

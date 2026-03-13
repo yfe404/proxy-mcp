@@ -21,15 +21,9 @@ export interface SpoofOptions {
   method: string;
   headers?: Record<string, string>;
   body?: string;
-  ja3: string;              // kept for backward compat (ignored — preset handles TLS)
   userAgent?: string;
   proxy?: string;
-  http2Fingerprint?: string; // kept for backward compat (ignored — preset handles HTTP/2)
-  headerOrder?: string[];    // ignored by impit (preset handles HTTP/2 pseudo-header order)
-  orderAsProvided?: boolean; // ignored
-  disableGrease?: boolean;   // ignored (preset controls GREASE)
   disableRedirect?: boolean;
-  forceHTTP1?: boolean;      // ignored (impit has no equivalent)
   insecureSkipVerify?: boolean;
   cookies?: Array<object> | { [key: string]: string };
   preset?: string;           // browser preset name → selects impitBrowser
@@ -101,40 +95,6 @@ export function stripHopByHopHeaders(headers: Record<string, string>): Record<st
   }
 
   return out;
-}
-
-/**
- * Re-sort headers according to the provided headerOrder.
- * Headers listed in the order come first (in that order);
- * unlisted headers are appended at the end in their original order.
- */
-export function reorderHeaders(
-  headers: Record<string, string>,
-  headerOrder: string[],
-): Record<string, string> {
-  const orderLower = headerOrder.map((h) => h.toLowerCase());
-  const orderSet = new Set(orderLower);
-  const result: Record<string, string> = {};
-
-  // Add headers in the specified order
-  for (const key of orderLower) {
-    // Find the matching header (case-insensitive)
-    for (const [k, v] of Object.entries(headers)) {
-      if (k.toLowerCase() === key) {
-        result[k] = v;
-        break;
-      }
-    }
-  }
-
-  // Append any remaining headers not in the order
-  for (const [k, v] of Object.entries(headers)) {
-    if (!orderSet.has(k.toLowerCase())) {
-      result[k] = v;
-    }
-  }
-
-  return result;
 }
 
 // ── Main request function ──

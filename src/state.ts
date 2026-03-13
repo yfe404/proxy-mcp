@@ -238,15 +238,9 @@ export interface TlsServerMetadata {
 }
 
 export interface FingerprintSpoofConfig {
-  ja3: string;
   userAgent?: string;
   hostPatterns?: string[];
-  http2Fingerprint?: string;
-  headerOrder?: string[];
-  orderAsProvided?: boolean;
-  disableGrease?: boolean;
   disableRedirect?: boolean;
-  forceHTTP1?: boolean;
   insecureSkipVerify?: boolean;
   preset?: string;
 }
@@ -1131,14 +1125,8 @@ export class ProxyManager {
                   { userAgent: spoofConfig.userAgent },
                 ),
                 body: req.body.buffer.length > 0 ? req.body.buffer.toString("utf-8") : undefined,
-                ja3: spoofConfig.ja3,
                 userAgent: spoofConfig.userAgent,
-                http2Fingerprint: spoofConfig.http2Fingerprint,
-                headerOrder: spoofConfig.headerOrder,
-                orderAsProvided: spoofConfig.orderAsProvided,
-                disableGrease: spoofConfig.disableGrease,
                 disableRedirect: spoofConfig.disableRedirect,
-                forceHTTP1: spoofConfig.forceHTTP1,
                 insecureSkipVerify: spoofConfig.insecureSkipVerify,
                 preset: spoofConfig.preset,
                 cookies,
