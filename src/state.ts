@@ -1062,6 +1062,15 @@ export class ProxyManager {
             // Only spoof HTTPS requests matching host patterns
             if (!req.url.startsWith("https://")) return {};
 
+            // Skip spoofing for top-level navigation requests (document loads).
+            // Advanced bot detectors (Kasada, Akamai) cross-validate TLS
+            // fingerprints with JS browser data during challenge flows.
+            // Letting navigations go through mockttp's native TLS allows the
+            // real browser to solve JS challenges consistently, while API and
+            // resource requests still benefit from TLS spoofing.
+            const secFetchDest = (req.headers as Record<string, string>)["sec-fetch-dest"];
+            if (secFetchDest === "document") return {};
+
             if (spoofConfig.hostPatterns && spoofConfig.hostPatterns.length > 0) {
               // req.hostname can be empty in HTTPS proxy mode; fall back to URL parsing
               let hostname = req.hostname || "";
@@ -1096,6 +1105,22 @@ export class ProxyManager {
                 }
               }
 
+              // Resolve upstream proxy for this request so curl-impersonate
+              // routes through the same upstream chain as non-spoofed traffic.
+              let upstreamProxy: string | undefined;
+              if (proxyConfig) {
+                let reqHostname = req.hostname || "";
+                if (!reqHostname) {
+                  try { reqHostname = new URL(req.url).hostname; } catch { /* ignore */ }
+                }
+                const resolved = typeof proxyConfig === "function"
+                  ? proxyConfig({ hostname: reqHostname })
+                  : proxyConfig;
+                if (resolved && typeof resolved === "object" && "proxyUrl" in resolved) {
+                  upstreamProxy = (resolved as { proxyUrl: string }).proxyUrl;
+                }
+              }
+
               const result = await spoofedRequest(req.url, {
                 method: req.method,
                 headers: applyFingerprintHeaderOverrides(
@@ -1114,6 +1139,7 @@ export class ProxyManager {
                 insecureSkipVerify: spoofConfig.insecureSkipVerify,
                 preset: spoofConfig.preset,
                 cookies,
+                proxy: upstreamProxy,
               });
 
               return {
@@ -1223,13 +1249,19 @@ export class ProxyManager {
         clientTls = this.tlsMetadataCache.get(key);
       }
 
+      // req.hostname can be empty in HTTPS proxy mode; fall back to URL parsing
+      let capturedHostname = req.hostname || "";
+      if (!capturedHostname) {
+        try { capturedHostname = new URL(req.url).hostname; } catch { /* ignore */ }
+      }
+
       const exchange: CapturedExchange = {
         id: req.id,
         timestamp: Date.now(),
         request: {
           method: req.method,
           url: req.url,
-          hostname: req.hostname || "",
+          hostname: capturedHostname,
           path: req.path,
           headers: serializeHeaders(req.headers as Record<string, string | string[] | undefined>),
           bodyPreview: capString(requestBody.toString("utf-8"), MAX_BODY_PREVIEW),
@@ -1245,6 +1277,7 @@ export class ProxyManager {
       const exchange = this.pendingRequests.get(res.id);
       if (exchange) {
         const responseBody = res.body.buffer;
+
         exchange.response = {
           statusCode: res.statusCode,
           statusMessage: res.statusMessage,
