@@ -40,20 +40,29 @@ if (window.chrome && !window.chrome.runtime) {
 
 // 2. Patch Permissions.query for 'notifications' check.
 //    CDP automation can cause this to reject abnormally.
+//    Uses native toString() disguise to avoid Function.prototype.toString detection.
 (function() {
   const origQuery = Permissions.prototype.query;
-  Permissions.prototype.query = function(params) {
+  const patchedQuery = function query(params) {
     if (params && params.name === 'notifications') {
       return Promise.resolve({ state: Notification.permission });
     }
     return origQuery.call(this, params);
   };
+  // Make toString() return native-looking string
+  const nativeToString = 'function query() { [native code] }';
+  patchedQuery.toString = () => nativeToString;
+  Object.defineProperty(patchedQuery, 'name', { value: 'query' });
+  Object.defineProperty(patchedQuery, 'length', { value: origQuery.length });
+  Permissions.prototype.query = patchedQuery;
 })();
 
-// 3. Harden navigator.webdriver as non-configurable false.
+// 3. Set navigator.webdriver to false matching Chrome's real descriptor.
+//    Real Chrome uses configurable:true — using configurable:false is
+//    a known automation detection signal.
 Object.defineProperty(navigator, 'webdriver', {
   get: () => false,
-  configurable: false,
+  configurable: true,
 });
 
 // 4. Clean CDP-injected artifacts from Error stacks.
@@ -64,7 +73,9 @@ Object.defineProperty(navigator, 'webdriver', {
       get: function() {
         const stack = origGetStack.get.call(this);
         if (typeof stack === 'string') {
-          return stack.replace(/\\n\\s+at\\s+Object\\.InjectedScript\\..+/g, '');
+          return stack
+            .replace(/\\n\\s+at\\s+Object\\.InjectedScript\\..+/g, '')
+            .replace(/\\n\\s+at\\s+[\\w.]*evaluate[\\w.]*\\s+\\(eval\\b.+/g, '');
         }
         return stack;
       },
