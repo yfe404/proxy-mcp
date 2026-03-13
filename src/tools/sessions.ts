@@ -224,7 +224,9 @@ export function registerSessionTools(server: McpServer): void {
           includeBody: include_body,
         });
         return {
-          content: [{ type: "text", text: truncateResult({ status: "success", ...result }) }],
+          content: [{ type: "text", text: include_body
+            ? JSON.stringify({ status: "success", ...result })
+            : truncateResult({ status: "success", ...result }) }],
         };
       } catch (e) {
         return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: toError(e) }) }] };

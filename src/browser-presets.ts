@@ -41,6 +41,27 @@ const PRESETS: Record<string, BrowserPreset> = {
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
     impitBrowser: "firefox133",
   },
+
+  okhttp3: {
+    name: "okhttp3",
+    description: "OkHttp 3.14.9 (Android/Java HTTP client)",
+    userAgent: "okhttp/3.14.9",
+    impitBrowser: "okhttp3",
+  },
+
+  okhttp4: {
+    name: "okhttp4",
+    description: "OkHttp 4.12.0 (Android/Kotlin HTTP client)",
+    userAgent: "okhttp/4.12.0",
+    impitBrowser: "okhttp4",
+  },
+
+  okhttp5: {
+    name: "okhttp5",
+    description: "OkHttp 5.0.0 (Android/Kotlin HTTP client)",
+    userAgent: "okhttp/5.0.0",
+    impitBrowser: "okhttp5",
+  },
 };
 
 /**
