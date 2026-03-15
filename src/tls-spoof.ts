@@ -113,10 +113,12 @@ export async function spoofedRequest(url: string, opts: SpoofOptions): Promise<S
   }
 
   // 2. Build Impit instance (per-request — different proxy/preset combos)
+  // When chaining through an upstream proxy, the proxy may present its own TLS
+  // certificate for CONNECT tunneling. ignoreTlsErrors must be true to allow this.
   const impit = new Impit({
     browser: browser as any,
     proxyUrl: opts.proxy,
-    ignoreTlsErrors: opts.insecureSkipVerify ?? false,
+    ignoreTlsErrors: opts.insecureSkipVerify ?? !!opts.proxy,
     followRedirects: !opts.disableRedirect,
     maxRedirects: opts.disableRedirect ? 0 : 10,
     timeout: 45_000,
