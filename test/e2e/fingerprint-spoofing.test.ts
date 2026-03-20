@@ -1,10 +1,10 @@
 /**
  * E2E fingerprint spoofing tests — success metrics for issue #2.
  *
- * Requirements: Docker, Chrome/Chromium, internet access.
+ * Requirements: Chrome/Chromium, internet access.
  *
  * These tests launch the full MCP server, start a proxy, enable fingerprint
- * spoofing via curl-impersonate, launch Chrome, and navigate to real sites
+ * spoofing via impit, launch Chrome, and navigate to real sites
  * to verify TLS/HTTP2 fingerprint fidelity.
  */
 
@@ -105,22 +105,10 @@ describe("E2E Fingerprint Spoofing", () => {
     const wsUrl = pageTarget.webSocketDebuggerUrl as string;
     cdpSession = await CdpSession.open(wsUrl, { timeoutMs: 10_000 });
 
-    // Warm up: navigate to a simple HTTPS page to trigger Docker image build +
-    // container start on the first spoofed request. This can take 30-60s on first run.
-    cdpSession.send("Page.navigate", { url: "https://httpbin.org/get" }, { timeoutMs: 120_000 }).catch(() => {});
-    // Poll traffic until we see the warm-up request come through
-    for (let i = 0; i < 60; i++) {
-      await sleep(2_000);
-      const warmRes = parseToolResult(
-        await client.callTool({
-          name: "proxy_search_traffic",
-          arguments: { query: "httpbin.org" },
-        }) as { content: Array<{ text: string }> },
-      );
-      const warmExchanges = warmRes.results as Array<Record<string, unknown>>;
-      if (warmExchanges.some((e) => (e.response as Record<string, unknown> | undefined))) break;
-    }
-    // Clear warm-up traffic
+    // Brief warm-up: navigate to a simple HTTPS page to establish connections.
+    // impit is in-process — no Docker cold-start needed.
+    cdpSession.send("Page.navigate", { url: "https://httpbin.org/get" }, { timeoutMs: 30_000 }).catch(() => {});
+    await sleep(5_000);
     await client.callTool({ name: "proxy_clear_traffic", arguments: {} });
   });
 
@@ -138,6 +126,9 @@ describe("E2E Fingerprint Spoofing", () => {
     try { await client.callTool({ name: "proxy_clear_ja3_spoof", arguments: {} }); } catch { /* */ }
     try { await client.callTool({ name: "proxy_stop", arguments: {} }); } catch { /* */ }
     try { await client.close(); } catch { /* */ }
+    // impit's native Rust connection pool keeps the event loop alive (no close() API).
+    // Force exit after cleanup since all assertions have already run.
+    setTimeout(() => process.exit(0), 1_000);
   });
 
   // ── Test 1: Barnes & Noble ──

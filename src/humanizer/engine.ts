@@ -357,14 +357,13 @@ class HumanizerEngine {
         eventsDispatched++;
       }
 
-      // keyDown
+      // keyDown (no text — character insertion happens via the char event)
       await state.session.send("Input.dispatchKeyEvent", {
         type: "keyDown",
         key: keyDef.key,
         code: keyDef.code,
         windowsVirtualKeyCode: keyDef.keyCode,
         nativeVirtualKeyCode: keyDef.keyCode,
-        ...(keyDef.text ? { text: keyDef.text, unmodifiedText: keyDef.text } : {}),
         ...(needsShift ? { modifiers: 8 } : {}),
       });
       eventsDispatched++;

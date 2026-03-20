@@ -21,6 +21,7 @@
     "chrome-launcher": "^1.1.2",
     "dockerode": "^4.0.4",
     "frida-js": "^0.4.0",
+    "impit": "^0.11.0",
     "mockttp": "^3.17.0",
     "zod": "^3.25.0"
   },

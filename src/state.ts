@@ -12,6 +12,7 @@
 import type * as mockttp from "mockttp";
 import type { CompletedRequest, CompletedResponse, ProxyConfig } from "mockttp";
 import { randomUUID } from "node:crypto";
+import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
 import { serializeHeaders, capString } from "./utils.js";
 import { enableServerTlsCapture, type ServerTlsCapture } from "./tls-utils.js";
 import { spoofedRequest, shutdownSpoofContainer, stripHopByHopHeaders } from "./tls-spoof.js";
@@ -238,15 +239,9 @@ export interface TlsServerMetadata {
 }
 
 export interface FingerprintSpoofConfig {
-  ja3: string;
   userAgent?: string;
   hostPatterns?: string[];
-  http2Fingerprint?: string;
-  headerOrder?: string[];
-  orderAsProvided?: boolean;
-  disableGrease?: boolean;
   disableRedirect?: boolean;
-  forceHTTP1?: boolean;
   insecureSkipVerify?: boolean;
   preset?: string;
 }
@@ -300,6 +295,19 @@ function nullsToUndefined(
 
 const MAX_TRAFFIC_ENTRIES = 1000;
 const MAX_BODY_PREVIEW = 4096;
+
+/** Decompress a response body buffer based on Content-Encoding header. */
+function decompressBody(body: Buffer, contentEncoding: string | undefined): Buffer {
+  if (!contentEncoding) return body;
+  try {
+    const enc = contentEncoding.toLowerCase().trim();
+    if (enc === "gzip" || enc === "x-gzip") return gunzipSync(body);
+    if (enc === "deflate") return inflateSync(body);
+    if (enc === "br") return brotliDecompressSync(body);
+  } catch { /* decompression failed — return raw bytes */ }
+  return body;
+}
+
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "proxy-connection",
@@ -1066,7 +1074,7 @@ export class ProxyManager {
             // Advanced bot detectors (Kasada, Akamai) cross-validate TLS
             // fingerprints across all requests to the same domain. If the
             // document loads via Chrome's native TLS but the telemetry POST
-            // goes through curl-impersonate, the JA3 mismatch triggers
+            // goes through impit, the JA3 mismatch triggers
             // rejection. Letting same-origin requests share Chrome's native
             // TLS connection keeps fingerprints consistent.
             const headers = req.headers as Record<string, string>;
@@ -1095,7 +1103,7 @@ export class ProxyManager {
 
             try {
               // Extract cookies from the intercepted request's cookie header.
-              // Forwarded to curl-impersonate for cookie jar parity.
+              // Forwarded to impit for cookie jar parity.
               let cookies: { [key: string]: string } | undefined;
               const cookieHeader = (req.headers as Record<string, string>)["cookie"];
               if (cookieHeader) {
@@ -1108,7 +1116,7 @@ export class ProxyManager {
                 }
               }
 
-              // Resolve upstream proxy for this request so curl-impersonate
+              // Resolve upstream proxy for this request so impit
               // routes through the same upstream chain as non-spoofed traffic.
               let upstreamProxy: string | undefined;
               if (proxyConfig) {
@@ -1131,14 +1139,8 @@ export class ProxyManager {
                   { userAgent: spoofConfig.userAgent },
                 ),
                 body: req.body.buffer.length > 0 ? req.body.buffer.toString("utf-8") : undefined,
-                ja3: spoofConfig.ja3,
                 userAgent: spoofConfig.userAgent,
-                http2Fingerprint: spoofConfig.http2Fingerprint,
-                headerOrder: spoofConfig.headerOrder,
-                orderAsProvided: spoofConfig.orderAsProvided,
-                disableGrease: spoofConfig.disableGrease,
                 disableRedirect: spoofConfig.disableRedirect,
-                forceHTTP1: spoofConfig.forceHTTP1,
                 insecureSkipVerify: spoofConfig.insecureSkipVerify,
                 preset: spoofConfig.preset,
                 cookies,
@@ -1150,7 +1152,7 @@ export class ProxyManager {
                   statusCode: result.status,
                   headers: result.headers,
                   // Use rawBody so mockttp doesn't auto content-encode based on Content-Encoding.
-                  // curl-impersonate already returns the bytes as received from the origin.
+                  // impit already returns the bytes as received from the origin.
                   rawBody: result.body,
                 },
               };
@@ -1280,12 +1282,14 @@ export class ProxyManager {
       const exchange = this.pendingRequests.get(res.id);
       if (exchange) {
         const responseBody = res.body.buffer;
+        const contentEncoding = res.headers["content-encoding"]?.toString();
+        const previewBody = decompressBody(responseBody, contentEncoding);
 
         exchange.response = {
           statusCode: res.statusCode,
           statusMessage: res.statusMessage,
           headers: serializeHeaders(res.headers as Record<string, string | string[] | undefined>),
-          bodyPreview: capString(responseBody.toString("utf-8"), MAX_BODY_PREVIEW),
+          bodyPreview: capString(previewBody.toString("utf-8"), MAX_BODY_PREVIEW),
           bodySize: responseBody.length,
         };
         if (res.timingEvents.responseSentTimestamp && res.timingEvents.startTimestamp) {
@@ -1314,6 +1318,8 @@ export class ProxyManager {
         this.pendingRawBodies.delete(res.id);
         this.pushTraffic(exchange);
       } else {
+        const orphanContentEncoding = res.headers["content-encoding"]?.toString();
+        const orphanPreviewBody = decompressBody(res.body.buffer, orphanContentEncoding);
         const orphanedExchange: CapturedExchange = {
           id: res.id,
           timestamp: Date.now(),
@@ -1322,7 +1328,7 @@ export class ProxyManager {
             statusCode: res.statusCode,
             statusMessage: res.statusMessage,
             headers: serializeHeaders(res.headers as Record<string, string | string[] | undefined>),
-            bodyPreview: capString(res.body.buffer.toString("utf-8"), MAX_BODY_PREVIEW),
+            bodyPreview: capString(orphanPreviewBody.toString("utf-8"), MAX_BODY_PREVIEW),
             bodySize: res.body.buffer.length,
           },
         };

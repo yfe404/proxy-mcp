@@ -154,18 +154,15 @@ export function registerInterceptorTools(server: McpServer): void {
       try {
         const proxyInfo = requireProxy();
 
-        // If fingerprint spoofing is active, enable stealth mode: minimal flags,
-        // stealth script injection, but NO User-Agent override. Chrome keeps its
-        // real UA so in-page bot sensors (Kasada, Akamai) see capabilities that
+        // Always launch in stealth mode: minimal flags + CDP stealth patches.
+        // Chrome keeps its real UA so in-page bot sensors see capabilities that
         // match the actual browser version.
-        const spoofConfig = proxyManager.getJa3SpoofConfig();
-
         const result = await interceptorManager.activate("chrome", {
           ...proxyInfo,
           url,
           browser,
           incognito,
-          stealthMode: !!spoofConfig,
+          stealthMode: true,
         });
         return {
           content: [{

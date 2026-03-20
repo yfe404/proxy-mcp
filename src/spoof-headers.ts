@@ -1,7 +1,7 @@
 /**
  * Header normalization for fingerprint spoofing.
  *
- * When we re-issue a request with a spoofed TLS/HTTP2 fingerprint (CycleTLS),
+ * When we re-issue a request with a spoofed TLS/HTTP2 fingerprint (impit),
  * it's easy to accidentally forward browser-provided headers (User-Agent +
  * UA Client Hints) that contradict the chosen TLS preset.
  *
