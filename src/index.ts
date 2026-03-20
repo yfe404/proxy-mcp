@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * Proxy MCP Server — entry point.
  *

@@ -192,66 +192,76 @@ Note: imported HAR entries (and entries created by `proxy_replay_session`) do no
 
 ## Setup
 
+### Quick install (Claude Code)
+
+```bash
+claude mcp add proxy-mcp -- npx -y proxy-mcp@latest
+```
+
+This installs proxy-mcp as an MCP server using stdio transport. It auto-updates on every Claude Code restart.
+
+**Scopes:**
+
+```bash
+# Per-user (available in all projects)
+claude mcp add --scope user proxy-mcp -- npx -y proxy-mcp@latest
+
+# Per-project (shared via .mcp.json, commit to repo)
+claude mcp add --scope project proxy-mcp -- npx -y proxy-mcp@latest
+```
+
 ### Prerequisites
 
 - Node.js 22+
-- impit (bundled — native TLS fingerprint spoofing, no Docker required)
 
-### Install & build
+### From source (development)
 
 ```bash
+git clone https://github.com/yfe404/proxy-mcp.git
+cd proxy-mcp
 npm install
 npm run build
 ```
-
-### Run
 
 ```bash
 # stdio transport (default) — used by MCP clients like Claude Code
 node dist/index.js
 
-# Streamable HTTP transport — exposes /mcp endpoint
+# Streamable HTTP transport — exposes /mcp endpoint for scripting
 node dist/index.js --transport http --port 3001
 ```
 
 `--transport` and `--port` also accept env vars `TRANSPORT` and `PORT`.
 
-### Global install (optional)
+### Manual MCP configuration
+
+**Claude Code CLI:**
 
 ```bash
-npm install -g .
+# stdio (default)
+claude mcp add proxy-mcp -- npx -y proxy-mcp@latest
+
+# From local clone
+claude mcp add proxy-mcp -- node /path/to/proxy-mcp/dist/index.js
+
+# HTTP transport for scripting
+claude mcp add --transport http proxy-mcp http://127.0.0.1:3001/mcp
 ```
 
-This makes the `proxy-mcp` command available system-wide (see `bin` in `package.json`).
-
-### Claude Code `.mcp.json`
-
-stdio transport (default):
+**`.mcp.json` (project-level, commit to repo):**
 
 ```json
 {
   "mcpServers": {
     "proxy": {
-      "command": "node",
-      "args": ["/path/to/proxy-mcp/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "proxy-mcp@latest"]
     }
   }
 }
 ```
 
-If installed globally, you can use the `proxy-mcp` command directly:
-
-```json
-{
-  "mcpServers": {
-    "proxy": {
-      "command": "proxy-mcp"
-    }
-  }
-}
-```
-
-Streamable HTTP transport:
+**Streamable HTTP transport:**
 
 ```json
 {
