@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.tsbuildinfo
 .proxy-mcp/
+.playwright-mcp/
+*.tgz
