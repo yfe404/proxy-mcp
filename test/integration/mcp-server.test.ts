@@ -121,7 +121,8 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_set_fingerprint_spoof"));
     assert.ok(names.includes("proxy_list_fingerprint_presets"));
     assert.ok(names.includes("proxy_check_fingerprint_runtime"));
-    assert.equal(names.length, 76);
+    assert.ok(names.includes("proxy_search_session_bodies"));
+    assert.equal(names.length, 77);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {

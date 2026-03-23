@@ -18,6 +18,7 @@ These are implemented and in the repo now:
   - `proxy_list_sessions`
   - `proxy_get_session`
   - `proxy_query_session`
+  - `proxy_search_session_bodies`
   - `proxy_get_session_exchange`
   - `proxy_export_har`
   - `proxy_delete_session`

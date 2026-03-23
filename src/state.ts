@@ -27,6 +27,8 @@ import {
   type SessionQuery,
   type SessionQueryResult,
   type SessionIndexEntry,
+  type SessionBodySearchQuery,
+  type SessionBodySearchResult,
   type HarImportOptions,
   type HarImportSummary,
 } from "./session-store.js";
@@ -668,6 +670,10 @@ export class ProxyManager {
 
   async querySession(sessionId: string, query: SessionQuery): Promise<SessionQueryResult> {
     return await this.sessionStore.querySession(sessionId, query);
+  }
+
+  async searchSessionBodies(sessionId: string, query: SessionBodySearchQuery): Promise<SessionBodySearchResult> {
+    return await this.sessionStore.searchSessionBodies(sessionId, query);
   }
 
   async getSessionExchange(

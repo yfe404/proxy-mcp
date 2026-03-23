@@ -150,7 +150,7 @@ export function registerSessionTools(server: McpServer): void {
 
   server.tool(
     "proxy_query_session",
-    "Query indexed session exchanges with filters and pagination.",
+    "Query indexed session exchanges by metadata (URL, hostname, method, status) with filters and pagination. Does NOT search body content — use proxy_search_session_bodies for that.",
     {
       session_id: z.string().describe("Session ID"),
       limit: z.number().optional().default(50),
@@ -177,6 +177,60 @@ export function registerSessionTools(server: McpServer): void {
           fromTs: from_ts,
           toTs: to_ts,
           text,
+        });
+        return {
+          content: [{ type: "text", text: truncateResult({ status: "success", ...result }) }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: toError(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "proxy_search_session_bodies",
+    "Search inside HTTP request/response bodies stored in a persistent session. " +
+    "Decompresses and searches actual body content — useful for finding specific text, " +
+    "prices, API responses, error messages, etc. in recorded traffic. Returns context " +
+    "snippets around each match (like grep -C).",
+    {
+      session_id: z.string().describe("Session ID"),
+      text: z.string().min(1).describe("Text to search for inside request/response bodies"),
+      hostname_contains: z.string().optional().describe("Pre-filter: hostname substring"),
+      url_contains: z.string().optional().describe("Pre-filter: URL substring"),
+      method: z.string().optional().describe("Pre-filter: HTTP method"),
+      status_code: z.number().optional().describe("Pre-filter: HTTP status code"),
+      content_type_contains: z.string().optional()
+        .describe("Pre-filter: response content-type substring (e.g. 'html', 'json')"),
+      search_in: z.enum(["response", "request", "both"]).optional().default("both")
+        .describe("Which bodies to search (default: both)"),
+      case_sensitive: z.boolean().optional().default(false)
+        .describe("Case-sensitive search (default: false)"),
+      limit: z.number().optional().default(10)
+        .describe("Max matching exchanges to return (default: 10, max: 100)"),
+      max_scan: z.number().optional().default(200)
+        .describe("Max bodies to decompress and search (default: 200, max: 5000)"),
+      context_chars: z.number().optional().default(120)
+        .describe("Characters of context around each match (default: 120)"),
+    },
+    async ({
+      session_id, text, hostname_contains, url_contains, method,
+      status_code, content_type_contains, search_in, case_sensitive,
+      limit, max_scan, context_chars,
+    }) => {
+      try {
+        const result = await proxyManager.searchSessionBodies(session_id, {
+          text,
+          hostnameContains: hostname_contains,
+          urlContains: url_contains,
+          method,
+          statusCode: status_code,
+          contentTypeContains: content_type_contains,
+          searchIn: search_in,
+          caseSensitive: case_sensitive,
+          limit,
+          maxScan: max_scan,
+          contextChars: context_chars,
         });
         return {
           content: [{ type: "text", text: truncateResult({ status: "success", ...result }) }],
