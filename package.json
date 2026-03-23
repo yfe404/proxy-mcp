@@ -1,6 +1,6 @@
 {
   "name": "proxy-mcp",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "MCP server for HTTP/HTTPS MITM proxy via mockttp",
   "type": "module",
   "main": "dist/index.js",
