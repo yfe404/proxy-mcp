@@ -642,6 +642,10 @@ export class ProxyManager {
     return this.sessionStore.getActiveProfile();
   }
 
+  getActiveSessionManifest(): SessionManifest | null {
+    return this.sessionStore.getActiveManifest();
+  }
+
   async startSession(options: SessionStartOptions = {}): Promise<SessionManifest> {
     return await this.sessionStore.startSession(options);
   }

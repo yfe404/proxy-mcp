@@ -4,57 +4,113 @@ proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It 
 
 81 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
 
-### Boundaries
+## Table of Contents
 
-- Only sees traffic **configured to route through it** (not a network tap or packet sniffer)
-- Spoofs **outgoing JA3 + HTTP/2 fingerprint + header order** (via impit — native Rust TLS impersonation), not JA4 (JA4 is capture-only)
-- Can add, overwrite, or delete HTTP headers; outgoing header **order** can be controlled via fingerprint spoofing
-- Returns its own CA certificate — does **not** expose upstream server certificate chains
+- [Setup](#setup)
+- [HTTP Proxy Configuration](#http-proxy-configuration)
+- [Boundaries](#boundaries)
+- [TLS ClientHello Passthrough](#tls-clienthello-passthrough-chrome-via-interceptor)
+- [Pairs well with CDP/Playwright](#pairs-well-with-cdpplaywright)
+- [Tools Reference](#tools-reference)
+  - [Lifecycle](#lifecycle-4)
+  - [Upstream Proxy](#upstream-proxy-4)
+  - [Interception Rules](#interception-rules-7)
+  - [Traffic Capture](#traffic-capture-4)
+  - [Modification Shortcuts](#modification-shortcuts-3)
+  - [TLS Fingerprinting](#tls-fingerprinting-9)
+  - [Interceptors](#interceptors-18)
+  - [DevTools Bridge](#devtools-bridge-14)
+  - [Sessions](#sessions-13)
+  - [Humanizer](#humanizer--cdp-input-5)
+- [Resources](#resources)
+- [Usage Example](#usage-example)
+- [Architecture](#architecture)
+- [Testing](#testing)
+- [Credits](#credits)
 
-### Pairs well with CDP/Playwright
+## Setup
 
-Use CDP/Playwright for browser internals (DOM, JS execution, localStorage, cookie jar), and proxy-mcp for wire-level capture/manipulation + replay. They complement each other:
+### Quick install (Claude Code)
 
-| Capability | CDP / Playwright | proxy-mcp |
-|---|---|---|
-| See/modify DOM, run JS in page | Yes | No |
-| Read cookies, localStorage, sessionStorage | Yes (browser internals) | Yes for proxy-launched Chrome via DevTools Bridge list/get tools; for any client, sees Cookie/Set-Cookie headers on the wire |
-| Capture HTTP request/response bodies | Yes for browser requests (protocol/size/streaming caveats) | Body previews only (4 KB cap, 1000-entry ring buffer) |
-| Modify requests in-flight (headers, body, mock, drop) | Via route/intercept handlers | Yes (declarative rules, hot-reload) |
-| Upstream proxy chaining (geo, auth) | Single browser via `--proxy-server` | Global + per-host upstreams across all clients (SOCKS4/5, HTTP, HTTPS, PAC) |
-| TLS fingerprint capture (JA3/JA4/JA3S) | No | Yes |
-| JA3 + HTTP/2 fingerprint spoofing | No | Proxy-side only (impit re-issues matching requests with spoofed TLS 1.3, HTTP/2 frames, and header order; does not alter the client's TLS handshake) |
-| Intercept non-browser traffic (curl, Python, Android apps) | No | Yes (interceptors) |
-| Human-like mouse/keyboard/scroll input | Via Playwright `page.mouse`/`page.keyboard` (instant, detectable timing) | Yes — CDP humanizer with Bezier curves, Fitts's law, WPM typing, eased scrolling |
+```bash
+claude mcp add proxy-mcp -- npx -y proxy-mcp@latest
+```
 
-A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through proxy automatically), drive pages with Playwright/CDP, and use proxy-mcp to capture the wire traffic, inject headers, or spoof JA3 — all in the same session. For behavioral realism, use `humanizer_*` tools instead of Playwright's instant `page.click()`/`page.type()` — they dispatch human-like CDP `Input.*` events with natural timing curves.
+This installs proxy-mcp as an MCP server using stdio transport. It auto-updates on every Claude Code restart.
 
-**Attach Playwright to proxy-launched Chrome:**
+**Scopes:**
 
-1. Call `proxy_start`
-2. Call `interceptor_chrome_launch`
-3. Read `proxy://chrome/primary` (or call `interceptor_chrome_cdp_info`) to get `cdp.httpUrl` (Playwright) and `cdp.browserWebSocketDebuggerUrl` (raw CDP clients)
-4. In Playwright:
-   ```ts
-   import { chromium } from "playwright";
-   const browser = await chromium.connectOverCDP("http://127.0.0.1:<cdp-port>");
-   ```
+```bash
+# Per-user (available in all projects)
+claude mcp add --scope user proxy-mcp -- npx -y proxy-mcp@latest
 
-**Proxy-safe built-in CDP flow (single-instance safe):**
+# Per-project (shared via .mcp.json, commit to repo)
+claude mcp add --scope project proxy-mcp -- npx -y proxy-mcp@latest
+```
 
-1. Call `proxy_start`
-2. Call `interceptor_chrome_launch`
-3. Call `interceptor_chrome_devtools_attach` with that `target_id`
-4. Call `interceptor_chrome_devtools_navigate` with `devtools_session_id`
-5. Call `proxy_search_traffic --query "<hostname>"` to confirm capture
+### Prerequisites
 
-**Human-like input flow (bypasses bot detection):**
+- Node.js 22+
 
-1. Call `proxy_start`
-2. Optionally enable fingerprint spoofing: `proxy_set_fingerprint_spoof --preset chrome_136`
-3. Call `interceptor_chrome_launch --url "https://example.com"` (stealth mode auto-enabled when spoofing)
-4. Use `humanizer_move` / `humanizer_click` / `humanizer_type` / `humanizer_scroll` with the `target_id`
-5. Use `humanizer_idle` between actions to maintain natural presence
+### From source (development)
+
+```bash
+git clone https://github.com/yfe404/proxy-mcp.git
+cd proxy-mcp
+npm install
+npm run build
+```
+
+```bash
+# stdio transport (default) — used by MCP clients like Claude Code
+node dist/index.js
+
+# Streamable HTTP transport — exposes /mcp endpoint for scripting
+node dist/index.js --transport http --port 3001
+```
+
+`--transport` and `--port` also accept env vars `TRANSPORT` and `PORT`.
+
+### Manual MCP configuration
+
+**Claude Code CLI:**
+
+```bash
+# stdio (default)
+claude mcp add proxy-mcp -- npx -y proxy-mcp@latest
+
+# From local clone
+claude mcp add proxy-mcp -- node /path/to/proxy-mcp/dist/index.js
+
+# HTTP transport for scripting
+claude mcp add --transport http proxy-mcp http://127.0.0.1:3001/mcp
+```
+
+**`.mcp.json` (project-level, commit to repo):**
+
+```json
+{
+  "mcpServers": {
+    "proxy": {
+      "command": "npx",
+      "args": ["-y", "proxy-mcp@latest"]
+    }
+  }
+}
+```
+
+**Streamable HTTP transport:**
+
+```json
+{
+  "mcpServers": {
+    "proxy": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:3001/mcp"
+    }
+  }
+}
+```
 
 ## HTTP Proxy Configuration
 
@@ -190,89 +246,82 @@ proxy_replay_session --session_id SESSION_ID --mode execute --target_base_url "h
 
 Note: imported HAR entries (and entries created by `proxy_replay_session`) do not carry JA3/JA4/JA3S handshake metadata. Use live proxy-captured traffic to analyze handshake fingerprints.
 
-## Setup
+## Boundaries
 
-### Quick install (Claude Code)
+- Only sees traffic **configured to route through it** (not a network tap or packet sniffer)
+- Spoofs **outgoing JA3 + HTTP/2 fingerprint + header order** (via impit — native Rust TLS impersonation), not JA4 (JA4 is capture-only)
+- Can add, overwrite, or delete HTTP headers; outgoing header **order** can be controlled via fingerprint spoofing
+- Returns its own CA certificate — does **not** expose upstream server certificate chains
 
-```bash
-claude mcp add proxy-mcp -- npx -y proxy-mcp@latest
-```
+### TLS ClientHello Passthrough (Chrome via interceptor)
 
-This installs proxy-mcp as an MCP server using stdio transport. It auto-updates on every Claude Code restart.
+When Chrome is launched via `interceptor_chrome_launch`, proxy-mcp forwards Chrome's **original TLS ClientHello** to the upstream server for document loads and same-origin sub-resource requests. The target server sees an authentic Chrome TLS fingerprint — not the proxy's.
 
-**Scopes:**
+This is a key difference from typical MITM proxies (mitmproxy, Charles, Fiddler) which re-terminate TLS with their own fingerprint, making MITM trivially detectable by anti-bot systems via JA3/JA4 analysis.
 
-```bash
-# Per-user (available in all projects)
-claude mcp add --scope user proxy-mcp -- npx -y proxy-mcp@latest
-
-# Per-project (shared via .mcp.json, commit to repo)
-claude mcp add --scope project proxy-mcp -- npx -y proxy-mcp@latest
-```
-
-### Prerequisites
-
-- Node.js 22+
-
-### From source (development)
+**How to verify passthrough is working:**
 
 ```bash
-git clone https://github.com/yfe404/proxy-mcp.git
-cd proxy-mcp
-npm install
-npm run build
+proxy_list_tls_fingerprints --hostname_filter "example.com"
 ```
 
-```bash
-# stdio transport (default) — used by MCP clients like Claude Code
-node dist/index.js
+- **JA3 varies** across requests to the same host — this is expected; Chrome randomizes cipher suite order per-connection (feature since Chrome 110+)
+- **JA4 stays stable** — same cipher/extension set, just different ordering
+- JA3 variation + JA4 stability = authentic Chrome TLS passthrough confirmed
 
-# Streamable HTTP transport — exposes /mcp endpoint for scripting
-node dist/index.js --transport http --port 3001
-```
+**When passthrough applies vs. when spoofing is needed:**
 
-`--transport` and `--port` also accept env vars `TRANSPORT` and `PORT`.
+| Traffic source | TLS behavior | Action needed |
+|---|---|---|
+| Chrome via `interceptor_chrome_launch` (document loads, same-origin) | Chrome's native ClientHello forwarded (passthrough) | None — fingerprint is authentic |
+| Chrome via `interceptor_chrome_launch` (cross-origin sub-resources, when spoof active) | Re-issued via impit with spoofed TLS | `proxy_set_fingerprint_spoof` with a browser preset |
+| Non-browser clients (curl, Python, `interceptor_spawn`) | Proxy's own TLS | `proxy_set_fingerprint_spoof` or `proxy_set_ja3_spoof` required |
+| HAR replay (`proxy_replay_session`) | Proxy's own TLS | `proxy_set_fingerprint_spoof` required |
 
-### Manual MCP configuration
+### Pairs well with CDP/Playwright
 
-**Claude Code CLI:**
+Use CDP/Playwright for browser internals (DOM, JS execution, localStorage, cookie jar), and proxy-mcp for wire-level capture/manipulation + replay. They complement each other:
 
-```bash
-# stdio (default)
-claude mcp add proxy-mcp -- npx -y proxy-mcp@latest
+| Capability | CDP / Playwright | proxy-mcp |
+|---|---|---|
+| See/modify DOM, run JS in page | Yes | No |
+| Read cookies, localStorage, sessionStorage | Yes (browser internals) | Yes for proxy-launched Chrome via DevTools Bridge list/get tools; for any client, sees Cookie/Set-Cookie headers on the wire |
+| Capture HTTP request/response bodies | Yes for browser requests (protocol/size/streaming caveats) | Body previews only (4 KB cap, 1000-entry ring buffer) |
+| Modify requests in-flight (headers, body, mock, drop) | Via route/intercept handlers | Yes (declarative rules, hot-reload) |
+| Upstream proxy chaining (geo, auth) | Single browser via `--proxy-server` | Global + per-host upstreams across all clients (SOCKS4/5, HTTP, HTTPS, PAC) |
+| TLS fingerprint capture (JA3/JA4/JA3S) | No | Yes |
+| JA3 + HTTP/2 fingerprint spoofing | No | Proxy-side only (impit re-issues matching requests with spoofed TLS 1.3, HTTP/2 frames, and header order; does not alter the client's TLS handshake) |
+| Intercept non-browser traffic (curl, Python, Android apps) | No | Yes (interceptors) |
+| Human-like mouse/keyboard/scroll input | Via Playwright `page.mouse`/`page.keyboard` (instant, detectable timing) | Yes — CDP humanizer with Bezier curves, Fitts's law, WPM typing, eased scrolling |
 
-# From local clone
-claude mcp add proxy-mcp -- node /path/to/proxy-mcp/dist/index.js
+A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through proxy automatically), drive pages with Playwright/CDP, and use proxy-mcp to capture the wire traffic, inject headers, or spoof JA3 — all in the same session. For behavioral realism, use `humanizer_*` tools instead of Playwright's instant `page.click()`/`page.type()` — they dispatch human-like CDP `Input.*` events with natural timing curves.
 
-# HTTP transport for scripting
-claude mcp add --transport http proxy-mcp http://127.0.0.1:3001/mcp
-```
+**Attach Playwright to proxy-launched Chrome:**
 
-**`.mcp.json` (project-level, commit to repo):**
+1. Call `proxy_start`
+2. Call `interceptor_chrome_launch`
+3. Read `proxy://chrome/primary` (or call `interceptor_chrome_cdp_info`) to get `cdp.httpUrl` (Playwright) and `cdp.browserWebSocketDebuggerUrl` (raw CDP clients)
+4. In Playwright:
+   ```ts
+   import { chromium } from "playwright";
+   const browser = await chromium.connectOverCDP("http://127.0.0.1:<cdp-port>");
+   ```
 
-```json
-{
-  "mcpServers": {
-    "proxy": {
-      "command": "npx",
-      "args": ["-y", "proxy-mcp@latest"]
-    }
-  }
-}
-```
+**Proxy-safe built-in CDP flow (single-instance safe):**
 
-**Streamable HTTP transport:**
+1. Call `proxy_start`
+2. Call `interceptor_chrome_launch`
+3. Call `interceptor_chrome_devtools_attach` with that `target_id`
+4. Call `interceptor_chrome_devtools_navigate` with `devtools_session_id`
+5. Call `proxy_search_traffic --query "<hostname>"` to confirm capture
 
-```json
-{
-  "mcpServers": {
-    "proxy": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:3001/mcp"
-    }
-  }
-}
-```
+**Human-like input flow (bypasses bot detection):**
+
+1. Call `proxy_start`
+2. Optionally enable fingerprint spoofing: `proxy_set_fingerprint_spoof --preset chrome_136`
+3. Call `interceptor_chrome_launch --url "https://example.com"` (stealth mode auto-enabled when spoofing)
+4. Use `humanizer_move` / `humanizer_click` / `humanizer_type` / `humanizer_scroll` with the `target_id`
+5. Use `humanizer_idle` between actions to maintain natural presence
 
 ## Tools Reference
 
@@ -456,6 +505,10 @@ Persistent, queryable on-disk capture for long runs and post-crash analysis.
 | `proxy_export_har` | Export full session or filtered subset to HAR |
 | `proxy_delete_session` | Delete a stored session |
 | `proxy_session_recover` | Rebuild indexes from records after unclean shutdown |
+
+`proxy_get_session_exchange` and `proxy_export_har` automatically decompress response bodies (gzip, deflate, brotli) based on the stored `content-encoding` header. The returned `responseBodyText` and `responseBodyBase64` contain the decompressed content. Raw compressed bytes are preserved on disk for exact replay fidelity.
+
+Note on `proxy_start` with `persistence_enabled: true`: this auto-creates a session. A subsequent `proxy_session_start()` call returns the existing active session instead of failing — no need to stop and re-start.
 
 ### Humanizer — CDP Input (5)
 
