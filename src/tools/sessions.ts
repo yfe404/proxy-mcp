@@ -33,6 +33,18 @@ export function registerSessionTools(server: McpServer): void {
         if (!proxyManager.isRunning()) {
           return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "Proxy is not running. Start it first with proxy_start." }) }] };
         }
+        // If a session was already auto-started by proxy_start(persistence_enabled: true),
+        // return the existing session instead of throwing an error.
+        const existing = proxyManager.getActiveSessionManifest();
+        if (existing) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              status: "success",
+              note: `Session '${existing.id}' is already active (started by proxy_start). Stop it first to start a new one.`,
+              session: existing,
+            }) }],
+          };
+        }
         const session = await proxyManager.startSession({
           sessionName: session_name,
           captureProfile: capture_profile,

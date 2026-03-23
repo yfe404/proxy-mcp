@@ -7,6 +7,7 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
 import type { CapturedExchange } from "./state.js";
 import { capString } from "./utils.js";
 
@@ -171,6 +172,23 @@ function fromBase64(b64?: string): string | null {
   return Buffer.from(b64, "base64").toString("utf8");
 }
 
+function fromBase64Buffer(b64?: string): Buffer | null {
+  if (!b64) return null;
+  return Buffer.from(b64, "base64");
+}
+
+/** Decompress a body buffer based on Content-Encoding header. */
+function decompressBody(body: Buffer, contentEncoding: string | undefined): Buffer {
+  if (!contentEncoding) return body;
+  try {
+    const enc = contentEncoding.toLowerCase().trim();
+    if (enc === "gzip" || enc === "x-gzip") return gunzipSync(body);
+    if (enc === "deflate") return inflateSync(body);
+    if (enc === "br") return brotliDecompressSync(body);
+  } catch { /* decompression failed — return raw bytes */ }
+  return body;
+}
+
 function headersToHar(headers: Record<string, string> | undefined): Array<{ name: string; value: string }> {
   if (!headers) return [];
   return Object.entries(headers).map(([name, value]) => ({ name, value }));
@@ -242,6 +260,10 @@ export class SessionStore {
 
   getActiveProfile(): CaptureProfile | null {
     return this.active?.manifest.captureProfile ?? null;
+  }
+
+  getActiveManifest(): SessionManifest | null {
+    return this.active ? structuredClone(this.active.manifest) : null;
   }
 
   getRuntimeStatus(): SessionRuntimeStatus {
@@ -590,12 +612,22 @@ export class SessionStore {
     }
 
     const record = await this.readRecordAtOffset(sessionId, entry.recordOffset, entry.recordLineBytes);
+    const resEncoding = record.exchange.response?.headers?.["content-encoding"];
+    const reqEncoding = record.exchange.request?.headers?.["content-encoding"];
+
+    const rawReqBuf = fromBase64Buffer(record.requestBodyBase64);
+    const rawResBuf = fromBase64Buffer(record.responseBodyBase64);
+    const decompressedReq = rawReqBuf ? decompressBody(rawReqBuf, reqEncoding) : null;
+    const decompressedRes = rawResBuf ? decompressBody(rawResBuf, resEncoding) : null;
+
     return {
       index: entry,
       record: {
         ...record,
-        requestBodyText: fromBase64(record.requestBodyBase64),
-        responseBodyText: fromBase64(record.responseBodyBase64),
+        requestBodyText: decompressedReq?.toString("utf-8") ?? null,
+        responseBodyText: decompressedRes?.toString("utf-8") ?? null,
+        responseBodyBase64: decompressedRes?.toString("base64") ?? record.responseBodyBase64,
+        requestBodyBase64: decompressedReq?.toString("base64") ?? record.requestBodyBase64,
       },
     };
   }
@@ -619,8 +651,12 @@ export class SessionStore {
       const req = record.exchange.request;
       const res = record.exchange.response;
 
-      const reqBody = includeBodies ? fromBase64(record.requestBodyBase64) : null;
-      const resBody = includeBodies ? fromBase64(record.responseBodyBase64) : null;
+      const resEncoding = record.exchange.response?.headers?.["content-encoding"];
+      const reqEncoding = record.exchange.request?.headers?.["content-encoding"];
+      const rawReqBuf = includeBodies ? fromBase64Buffer(record.requestBodyBase64) : null;
+      const rawResBuf = includeBodies ? fromBase64Buffer(record.responseBodyBase64) : null;
+      const reqBody = rawReqBuf ? decompressBody(rawReqBuf, reqEncoding).toString("utf-8") : null;
+      const resBody = rawResBuf ? decompressBody(rawResBuf, resEncoding).toString("utf-8") : null;
 
       const entry = {
         startedDateTime: new Date(record.exchange.timestamp).toISOString(),
