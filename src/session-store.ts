@@ -65,6 +65,7 @@ export interface SessionIndexEntry {
   ja3: string | null;
   ja4: string | null;
   ja3s?: string | null;
+  responseContentType?: string | null;
   recordOffset: number;
   recordLineBytes: number;
 }
@@ -95,6 +96,41 @@ export interface SessionQueryResult {
   limit: number;
   offset: number;
   items: SessionIndexEntry[];
+}
+
+export interface SessionBodySearchQuery {
+  text: string;
+  hostnameContains?: string;
+  urlContains?: string;
+  method?: string;
+  statusCode?: number;
+  contentTypeContains?: string;
+  searchIn?: "response" | "request" | "both";
+  caseSensitive?: boolean;
+  limit?: number;
+  maxScan?: number;
+  contextChars?: number;
+}
+
+export interface SessionBodySearchMatch {
+  exchangeId: string;
+  seq: number;
+  url: string;
+  method: string;
+  statusCode: number | null;
+  contentType: string | null;
+  matchedIn: "request" | "response";
+  source: "full" | "preview";
+  snippets: Array<{ position: number; context: string }>;
+}
+
+export interface SessionBodySearchResult {
+  query: string;
+  scanned: number;
+  skippedBinary: number;
+  skippedNoBody: number;
+  totalMatches: number;
+  matches: SessionBodySearchMatch[];
 }
 
 export interface HarImportOptions {
@@ -187,6 +223,59 @@ function decompressBody(body: Buffer, contentEncoding: string | undefined): Buff
     if (enc === "br") return brotliDecompressSync(body);
   } catch { /* decompression failed — return raw bytes */ }
   return body;
+}
+
+const BINARY_MIME_PREFIXES = [
+  "image/", "audio/", "video/", "font/",
+  "application/octet-stream", "application/zip",
+  "application/gzip", "application/pdf",
+  "application/wasm",
+];
+
+function isKnownBinaryMime(contentType: string | null | undefined): boolean {
+  if (!contentType) return false;
+  const ct = contentType.toLowerCase();
+  return BINARY_MIME_PREFIXES.some(prefix => ct.startsWith(prefix));
+}
+
+function isBinaryContent(buf: Buffer): boolean {
+  const checkLen = Math.min(buf.length, 512);
+  for (let i = 0; i < checkLen; i++) {
+    if (buf[i] === 0) return true;
+  }
+  return false;
+}
+
+function extractSnippets(
+  text: string,
+  searchText: string,
+  caseSensitive: boolean,
+  contextChars: number,
+  maxSnippets: number,
+): Array<{ position: number; context: string }> {
+  const haystack = caseSensitive ? text : text.toLowerCase();
+  const needle = caseSensitive ? searchText : searchText.toLowerCase();
+  const snippets: Array<{ position: number; context: string }> = [];
+  let startPos = 0;
+
+  while (snippets.length < maxSnippets) {
+    const idx = haystack.indexOf(needle, startPos);
+    if (idx === -1) break;
+
+    const ctxStart = Math.max(0, idx - contextChars);
+    const ctxEnd = Math.min(text.length, idx + needle.length + contextChars);
+
+    const before = text.slice(ctxStart, idx);
+    const match = text.slice(idx, idx + needle.length);
+    const after = text.slice(idx + needle.length, ctxEnd);
+
+    const context = `${ctxStart > 0 ? "..." : ""}${before}[${match}]${after}${ctxEnd < text.length ? "..." : ""}`;
+
+    snippets.push({ position: idx, context });
+    startPos = idx + needle.length;
+  }
+
+  return snippets;
 }
 
 function headersToHar(headers: Record<string, string> | undefined): Array<{ name: string; value: string }> {
@@ -598,6 +687,134 @@ export class SessionStore {
     };
   }
 
+  async searchSessionBodies(
+    sessionId: string,
+    query: SessionBodySearchQuery,
+  ): Promise<SessionBodySearchResult> {
+    const entries = await this.readSessionIndex(sessionId);
+
+    const searchText = query.text;
+    const searchIn = query.searchIn ?? "both";
+    const caseSensitive = query.caseSensitive ?? false;
+    const limit = Math.max(1, Math.min(100, query.limit ?? 10));
+    const maxScan = Math.max(1, Math.min(5000, query.maxScan ?? 200));
+    const contextChars = Math.max(20, Math.min(500, query.contextChars ?? 120));
+
+    const method = query.method?.toUpperCase();
+    const hostnameContains = query.hostnameContains?.toLowerCase();
+    const urlContains = query.urlContains?.toLowerCase();
+    const contentTypeContains = query.contentTypeContains?.toLowerCase();
+
+    const candidates = entries.filter(e => {
+      if (method && e.method !== method) return false;
+      if (hostnameContains && !e.hostname.toLowerCase().includes(hostnameContains)) return false;
+      if (urlContains && !e.url.toLowerCase().includes(urlContains)) return false;
+      if (query.statusCode !== undefined && e.statusCode !== query.statusCode) return false;
+      if (contentTypeContains && e.responseContentType != null) {
+        if (!e.responseContentType.includes(contentTypeContains)) return false;
+      }
+      if (isKnownBinaryMime(e.responseContentType)) return false;
+      return true;
+    });
+
+    candidates.sort((a, b) => a.timestamp - b.timestamp);
+
+    const recordsPath = path.join(this.rootDir, sessionId, RECORDS_FILENAME);
+    const fh = await fs.open(recordsPath, "r");
+
+    const result: SessionBodySearchResult = {
+      query: searchText,
+      scanned: 0,
+      skippedBinary: 0,
+      skippedNoBody: 0,
+      totalMatches: 0,
+      matches: [],
+    };
+
+    try {
+      for (const entry of candidates) {
+        if (result.scanned >= maxScan) break;
+        if (result.matches.length >= limit) break;
+
+        const buf = Buffer.alloc(entry.recordLineBytes);
+        const readResult = await fh.read(buf, 0, entry.recordLineBytes, entry.recordOffset);
+        const line = buf.subarray(0, readResult.bytesRead).toString("utf8").trimEnd();
+        let record: PersistedExchangeRecord;
+        try {
+          record = JSON.parse(line) as PersistedExchangeRecord;
+        } catch {
+          continue;
+        }
+
+        result.scanned++;
+        let exchangeMatched = false;
+        let exchangeHadBinary = false;
+        let exchangeHadNoBody = false;
+
+        if (searchIn === "response" || searchIn === "both") {
+          const bodyResult = this.extractSearchableBody(record, "response");
+          if (bodyResult === null) {
+            exchangeHadNoBody = true;
+          } else if (bodyResult === "binary") {
+            exchangeHadBinary = true;
+          } else {
+            const snippets = extractSnippets(bodyResult.text, searchText, caseSensitive, contextChars, 3);
+            if (snippets.length > 0) {
+              exchangeMatched = true;
+              result.totalMatches++;
+              result.matches.push({
+                exchangeId: entry.exchangeId,
+                seq: entry.seq,
+                url: capString(entry.url, 200),
+                method: entry.method,
+                statusCode: entry.statusCode,
+                contentType: entry.responseContentType ?? record.exchange.response?.headers?.["content-type"] ?? null,
+                matchedIn: "response",
+                source: bodyResult.source,
+                snippets,
+              });
+            }
+          }
+        }
+
+        if (!exchangeMatched && (searchIn === "request" || searchIn === "both")) {
+          const bodyResult = this.extractSearchableBody(record, "request");
+          if (bodyResult === null) {
+            if (!exchangeHadNoBody) exchangeHadNoBody = true;
+          } else if (bodyResult === "binary") {
+            if (!exchangeHadBinary) exchangeHadBinary = true;
+          } else {
+            const snippets = extractSnippets(bodyResult.text, searchText, caseSensitive, contextChars, 3);
+            if (snippets.length > 0) {
+              result.totalMatches++;
+              result.matches.push({
+                exchangeId: entry.exchangeId,
+                seq: entry.seq,
+                url: capString(entry.url, 200),
+                method: entry.method,
+                statusCode: entry.statusCode,
+                contentType: record.exchange.request?.headers?.["content-type"] ?? null,
+                matchedIn: "request",
+                source: bodyResult.source,
+                snippets,
+              });
+              exchangeMatched = true;
+            }
+          }
+        }
+
+        if (!exchangeMatched) {
+          if (exchangeHadBinary) result.skippedBinary++;
+          else if (exchangeHadNoBody) result.skippedNoBody++;
+        }
+      }
+    } finally {
+      await fh.close();
+    }
+
+    return result;
+  }
+
   async getSessionExchange(
     sessionId: string,
     opts: { seq?: number; exchangeId?: string; includeBody?: boolean },
@@ -928,6 +1145,41 @@ export class SessionStore {
     return { highErrorEndpoints, slowestExchanges, hostErrorRates };
   }
 
+  private extractSearchableBody(
+    record: PersistedExchangeRecord,
+    side: "request" | "response",
+  ): { text: string; source: "full" | "preview" } | "binary" | null {
+    const exchange = record.exchange;
+
+    if (side === "response") {
+      if (record.responseBodyBase64) {
+        const raw = fromBase64Buffer(record.responseBodyBase64);
+        if (!raw || raw.length === 0) return null;
+        const encoding = exchange.response?.headers?.["content-encoding"];
+        const decompressed = decompressBody(raw, encoding);
+        if (isBinaryContent(decompressed)) return "binary";
+        return { text: decompressed.toString("utf-8"), source: "full" };
+      }
+      if (exchange.response?.bodyPreview) {
+        return { text: exchange.response.bodyPreview, source: "preview" };
+      }
+      return null;
+    }
+
+    if (record.requestBodyBase64) {
+      const raw = fromBase64Buffer(record.requestBodyBase64);
+      if (!raw || raw.length === 0) return null;
+      const encoding = exchange.request?.headers?.["content-encoding"];
+      const decompressed = decompressBody(raw, encoding);
+      if (isBinaryContent(decompressed)) return "binary";
+      return { text: decompressed.toString("utf-8"), source: "full" };
+    }
+    if (exchange.request?.bodyPreview) {
+      return { text: exchange.request.bodyPreview, source: "preview" };
+    }
+    return null;
+  }
+
   private toIndexEntry(
     record: PersistedExchangeRecord,
     location: { recordOffset: number; recordLineBytes: number },
@@ -952,6 +1204,7 @@ export class SessionStore {
       ja3: exchange.tls?.client?.ja3Fingerprint ?? null,
       ja4: exchange.tls?.client?.ja4Fingerprint ?? null,
       ja3s: exchange.tls?.server?.ja3sFingerprint ?? null,
+      responseContentType: exchange.response?.headers?.["content-type"]?.split(";")[0]?.trim().toLowerCase() ?? null,
       recordOffset: location.recordOffset,
       recordLineBytes: location.recordLineBytes,
     };
