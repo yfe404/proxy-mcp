@@ -28,6 +28,7 @@ import { registerInterceptorTools } from "./tools/interceptors.js";
 import { registerDevToolsTools } from "./tools/devtools.js";
 import { registerSessionTools } from "./tools/sessions.js";
 import { registerHumanizerTools } from "./tools/humanizer.js";
+import { registerTransparentTools } from "./tools/transparent.js";
 import { registerResources } from "./resources.js";
 import { initInterceptors } from "./interceptors/init.js";
 
@@ -65,6 +66,7 @@ function createMcpServer(): McpServer {
   registerDevToolsTools(server);
   registerSessionTools(server);
   registerHumanizerTools(server);
+  registerTransparentTools(server);
   registerResources(server);
 
   return server;

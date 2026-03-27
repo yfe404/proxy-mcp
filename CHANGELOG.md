@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.0
+
+### New Features
+
+- **Transparent proxy mode**: New `proxy_start_transparent`, `proxy_stop_transparent`, and `proxy_transparent_status` tools. The transparent listener receives iptables-redirected traffic (no CONNECT tunnels), shares the same CA cert, interception rules, and ring buffer as the explicit proxy. Rules are kept in sync across both listeners via the rebuild cycle.
+- **Traffic source tagging**: Each captured exchange is tagged with `source: "explicit"` or `source: "transparent"` to distinguish proxy-configured traffic from iptables-redirected traffic. `proxy_list_traffic` gains a `source_filter` parameter.
+
+### Bug Fixes
+
+- **Android cert injection wipes system CA store** (fixes #11): `interceptor_android_activate` now saves existing system certs before mounting tmpfs, unstacks previous overlay mounts, and on Android 14+ injects the cert into the zygote mount namespace so all app processes see it.
+
 ## 1.2.0
 
 ### New Features

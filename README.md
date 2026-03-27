@@ -13,6 +13,7 @@ proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It 
 - [Pairs well with CDP/Playwright](#pairs-well-with-cdpplaywright)
 - [Tools Reference](#tools-reference)
   - [Lifecycle](#lifecycle-4)
+  - [Transparent Proxy](#transparent-proxy-3)
   - [Upstream Proxy](#upstream-proxy-4)
   - [Interception Rules](#interception-rules-7)
   - [Traffic Capture](#traffic-capture-4)
@@ -333,6 +334,14 @@ A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through p
 | `proxy_stop` | Stop proxy (traffic/cert retained) |
 | `proxy_status` | Running state, port, rule/traffic counts |
 | `proxy_get_ca_cert` | CA certificate PEM + SPKI fingerprint |
+
+### Transparent Proxy (3)
+
+| Tool | Description |
+|------|-------------|
+| `proxy_start_transparent` | Start transparent listener for iptables-redirected traffic (shares rules + ring buffer with explicit proxy) |
+| `proxy_stop_transparent` | Stop transparent listener |
+| `proxy_transparent_status` | Transparent listener port, state, and traffic count |
 
 ### Upstream Proxy (4)
 

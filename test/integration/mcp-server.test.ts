@@ -17,6 +17,7 @@ import { registerTlsTools } from "../../src/tools/tls.js";
 import { registerInterceptorTools } from "../../src/tools/interceptors.js";
 import { registerDevToolsTools } from "../../src/tools/devtools.js";
 import { registerSessionTools } from "../../src/tools/sessions.js";
+import { registerTransparentTools } from "../../src/tools/transparent.js";
 import { registerResources } from "../../src/resources.js";
 import { initInterceptors } from "../../src/interceptors/init.js";
 
@@ -32,6 +33,7 @@ async function createTestSetup() {
   registerInterceptorTools(server);
   registerDevToolsTools(server);
   registerSessionTools(server);
+  registerTransparentTools(server);
   registerResources(server);
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -54,7 +56,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 76 tools", async () => {
+  it("lists all 80 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -122,7 +124,11 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_list_fingerprint_presets"));
     assert.ok(names.includes("proxy_check_fingerprint_runtime"));
     assert.ok(names.includes("proxy_search_session_bodies"));
-    assert.equal(names.length, 77);
+    // Transparent proxy tools
+    assert.ok(names.includes("proxy_start_transparent"));
+    assert.ok(names.includes("proxy_stop_transparent"));
+    assert.ok(names.includes("proxy_transparent_status"));
+    assert.equal(names.length, 80);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {
