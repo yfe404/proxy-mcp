@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+### New Features
+
+- **OkHttp fingerprint presets**: `okhttp3`, `okhttp4`, and `okhttp5` presets now produce authentic OkHttp TLS fingerprints, HTTP/2 frames, and User-Agent headers. Requires `impit@0.13.0` which ships the upstream OkHttp fingerprint support (apify/impit#416).
+
+### Dependencies
+
+- Upgraded `impit` from `0.11.0` to `0.13.0`.
+
 ## 1.1.0
 
 ### New Features
