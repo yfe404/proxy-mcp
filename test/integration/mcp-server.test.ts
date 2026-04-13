@@ -54,7 +54,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 76 tools", async () => {
+  it("lists all 71 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -81,28 +81,23 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("interceptor_list"));
     assert.ok(names.includes("interceptor_status"));
     assert.ok(names.includes("interceptor_deactivate_all"));
-    assert.ok(names.includes("interceptor_chrome_launch"));
-    assert.ok(names.includes("interceptor_chrome_cdp_info"));
-    assert.ok(names.includes("interceptor_chrome_navigate"));
+    assert.ok(names.includes("interceptor_browser_launch"));
+    assert.ok(names.includes("interceptor_browser_navigate"));
+    assert.ok(names.includes("interceptor_browser_close"));
     assert.ok(names.includes("interceptor_spawn"));
     assert.ok(names.includes("interceptor_android_devices"));
     assert.ok(names.includes("interceptor_frida_apps"));
     assert.ok(names.includes("interceptor_docker_attach"));
-    // DevTools bridge tools
-    assert.ok(names.includes("interceptor_chrome_devtools_attach"));
-    assert.ok(names.includes("interceptor_chrome_devtools_pull_sidecar"));
-    assert.ok(names.includes("interceptor_chrome_devtools_navigate"));
-    assert.ok(names.includes("interceptor_chrome_devtools_snapshot"));
-    assert.ok(names.includes("interceptor_chrome_devtools_list_network"));
-    assert.ok(names.includes("interceptor_chrome_devtools_list_console"));
-    assert.ok(names.includes("interceptor_chrome_devtools_screenshot"));
-    assert.ok(names.includes("interceptor_chrome_devtools_list_cookies"));
-    assert.ok(names.includes("interceptor_chrome_devtools_get_cookie"));
-    assert.ok(names.includes("interceptor_chrome_devtools_list_storage_keys"));
-    assert.ok(names.includes("interceptor_chrome_devtools_get_storage_value"));
-    assert.ok(names.includes("interceptor_chrome_devtools_list_network_fields"));
-    assert.ok(names.includes("interceptor_chrome_devtools_get_network_field"));
-    assert.ok(names.includes("interceptor_chrome_devtools_detach"));
+    // Browser DevTools-equivalent tools (Playwright-driven)
+    assert.ok(names.includes("interceptor_browser_snapshot"));
+    assert.ok(names.includes("interceptor_browser_screenshot"));
+    assert.ok(names.includes("interceptor_browser_list_console"));
+    assert.ok(names.includes("interceptor_browser_list_cookies"));
+    assert.ok(names.includes("interceptor_browser_get_cookie"));
+    assert.ok(names.includes("interceptor_browser_list_storage_keys"));
+    assert.ok(names.includes("interceptor_browser_get_storage_value"));
+    assert.ok(names.includes("interceptor_browser_list_network_fields"));
+    assert.ok(names.includes("interceptor_browser_get_network_field"));
     // Session persistence tools
     assert.ok(names.includes("proxy_session_start"));
     assert.ok(names.includes("proxy_session_stop"));
@@ -122,7 +117,7 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_list_fingerprint_presets"));
     assert.ok(names.includes("proxy_check_fingerprint_runtime"));
     assert.ok(names.includes("proxy_search_session_bodies"));
-    assert.equal(names.length, 77);
+    assert.equal(names.length, 71);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {
@@ -206,9 +201,8 @@ describe("MCP Server Integration", () => {
     assert.ok(uris.includes("proxy://ca-cert"));
     assert.ok(uris.includes("proxy://traffic/summary"));
     assert.ok(uris.includes("proxy://interceptors"));
-    assert.ok(uris.includes("proxy://chrome/primary"));
-    assert.ok(uris.includes("proxy://chrome/targets"));
-    assert.ok(uris.includes("proxy://chrome/devtools/sessions"));
+    assert.ok(uris.includes("proxy://browser/primary"));
+    assert.ok(uris.includes("proxy://browser/targets"));
     assert.ok(uris.includes("proxy://sessions"));
   });
 
@@ -219,7 +213,6 @@ describe("MCP Server Integration", () => {
     const { resourceTemplates } = await client.listResourceTemplates();
     const templates = resourceTemplates.map((t) => t.uriTemplate);
 
-    assert.ok(templates.includes("proxy://chrome/{target_id}/cdp"));
     assert.ok(templates.includes("proxy://sessions/{session_id}/summary"));
     assert.ok(templates.includes("proxy://sessions/{session_id}/timeline"));
     assert.ok(templates.includes("proxy://sessions/{session_id}/findings"));

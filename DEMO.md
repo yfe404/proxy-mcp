@@ -23,8 +23,10 @@ You are running an interactive demo of **proxy-mcp** for the user's team.
 5. **When the user picks cleanup** (or all demos are done), run the Cleanup sequence
    and deliver the Finale summary.
 
-**Error handling:** If a step fails (e.g. Chrome not installed), explain what *would*
-have happened and return to the menu. Never stop the demo on a failure.
+**Error handling:** If a step fails (e.g. cloakbrowser binary not yet downloaded),
+explain what *would* have happened and return to the menu. Never stop the demo on
+a failure. First `interceptor_browser_launch` call may take 30–60 s while the
+~200 MB stealth Chromium binary downloads.
 
 **Tool prefix:** All tools are from the `proxy` MCP server — call them as
 `mcp__proxy__<tool_name>`.
@@ -37,7 +39,7 @@ Present these options to the user:
 
 | # | Demo | One-liner |
 |---|------|-----------|
-| A | **Chrome Interception** | Launch Chrome through the proxy, capture & inspect HTTPS traffic |
+| A | **Browser Interception** | Launch cloakbrowser through the proxy, capture & inspect HTTPS traffic |
 | B | **Mock API Responses** | Return fake JSON for any URL pattern, test with curl |
 | C | **Header Injection** | Add custom headers to all requests in real-time |
 | D | **Body Modification** | Find-and-replace inside response bodies in-flight |
@@ -61,51 +63,47 @@ Then present the menu.
 
 ---
 
-## Demo A: Chrome Interception
+## Demo A: Browser Interception
 
-**Say:** "Launching Chrome with proxy flags and certificate trust auto-configured —
-zero manual setup."
+**Say:** "Launching cloakbrowser (stealth Chromium) with proxy flags, CA trust,
+and humanize mode all auto-configured — zero manual setup."
 
 **Steps:**
 
 1. Call `interceptor_list` with `{}`
    — Show available interceptors
 
-2. Call `interceptor_chrome_launch` with `{"url": "https://example.com"}`
-   — Chrome launches with --proxy-server and SPKI cert trust flags
+2. Call `interceptor_browser_launch` with `{"url": "https://example.com"}`
+   — cloakbrowser launches with proxy + SPKI cert trust, Playwright-driven
 
-3. Call `interceptor_chrome_cdp_info` with `{"target_id": "<targetId from launch>", "include_targets": false}`
-   — Show CDP endpoints for Playwright/DevTools attachment
+3. Call `interceptor_browser_navigate` with
+   `{"target_id": "<targetId from launch>", "url": "https://example.com", "wait_for_proxy_capture": true}`
+   — Navigate via Playwright `page.goto` with proxy-capture verification
 
-4. Call `interceptor_chrome_devtools_attach` with `{"target_id": "<targetId from launch>"}`
-   — Start a bound chrome-devtools-mcp sidecar session tied to this exact Chrome instance
+   Optionally mention: current page state is exposed as an MCP resource at
+   `proxy://browser/primary`.
 
-5. Call `interceptor_chrome_devtools_navigate` with
-   `{"devtools_session_id":"<sessionId from attach>","url":"https://example.com","wait_for_proxy_capture":true}`
-   — Navigate with cross-instance safety and proxy-capture verification
+4. Call `interceptor_browser_snapshot` with `{"target_id": "<targetId from launch>"}`
+   — ARIA role tree snapshot (great for LLM reasoning)
 
-   Optionally mention: the same info is also available as an MCP resource at `proxy://chrome/primary`
-   (and per-target via the `proxy://chrome/{target_id}/cdp` resource template).
-
-6. Wait 4 seconds (`sleep 4` via Bash) for the page to load
-
-7. Call `proxy_list_traffic` with `{"limit": 20}`
+5. Call `proxy_list_traffic` with `{"limit": 20}`
    — Show captured HTTPS exchanges
 
-8. Call `proxy_search_traffic` with `{"query": "example.com", "limit": 5}`
+6. Call `proxy_search_traffic` with `{"query": "example.com", "limit": 5}`
    — Search the captured traffic
 
-9. Pick the **first exchange ID** from results, then call
+7. Pick the **first exchange ID** from results, then call
    `proxy_get_exchange` with `{"exchange_id": "<that_id>"}`
    — Full request/response deep-dive
 
 **Say:** "We captured {count} HTTPS exchanges from one page load. You get full
 headers, sizes, timing, TLS fingerprints, and body previews (preview size is
-capped). Chrome trusted our CA via the SPKI fingerprint flag, so no certificate
-warnings."
+capped). The browser trusted our CA via the SPKI fingerprint flag, so no
+certificate warnings. Source-level stealth patches mean `navigator.webdriver`
+is false and ja3n/ja4 match real Chrome."
 
-**If Chrome is not available:** Explain that the interceptor also supports Chromium,
-Brave, and Edge. Fall back to spawning curl instead:
+**If cloakbrowser binary isn't ready:** First launch takes 30–60 s to download.
+Fall back to spawning curl instead:
 - Call `interceptor_spawn` with `{"command": "curl", "args": ["-s", "https://example.com"]}`
 - Wait 2 seconds, then call `proxy_list_traffic` with `{"limit": 10}`
 - Pick an exchange and call `proxy_get_exchange`
@@ -285,7 +283,7 @@ Return to menu.
 **Say:** "Cleaning up — shutting down all interceptors and stopping the proxy."
 
 1. Call `interceptor_deactivate_all` with `{}`
-   — Kill all Chrome instances and spawned processes
+   — Close all browser instances and spawned processes
 
 2. Call `proxy_clear_traffic` with `{}`
    — Wipe captured traffic
@@ -322,4 +320,4 @@ After cleanup, deliver this summary:
 - Request forwarding and connection dropping
 - Per-host proxy routing
 
-**Stats:** 73 tools, 8 resources, 4 resource templates, 5 interceptor types.
+**Stats:** 71 tools, 6 resources, 3 resource templates, 5 interceptor types.

@@ -4,3 +4,4 @@ dist/
 .proxy-mcp/
 .playwright-mcp/
 *.tgz
+.mcp.json

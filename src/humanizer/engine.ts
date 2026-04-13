@@ -1,14 +1,20 @@
 /**
- * CDP dispatch engine for human-like browser input.
+ * Playwright-backed humanizer engine.
  *
- * Singleton that manages persistent CdpSession per Chrome target, tracks
- * mouse position across calls, and dispatches Input.* events through CDP.
+ * Replaces the former CDP-based engine. Uses the cloakbrowser-launched
+ * Playwright Page for each target. cloakbrowser's `humanize: true` already
+ * patches input dispatch at the C++ layer; this engine layers custom per-call
+ * timing profiles (WPM + bigram + typo, Bezier paths, eased scroll) on top.
+ *
+ * humanizer_click supports locator-first targeting (selector | role+name |
+ * text | label) so callers no longer need to guess pixel coordinates — the
+ * locator auto-waits for visible+enabled+stable+in-view before dispatching.
  */
 
-import { CdpSession, getCdpTargets } from "../cdp-utils.js";
-import { interceptorManager } from "../interceptors/manager.js";
+import type { Page, Locator } from "playwright-core";
+import { getPageForTarget } from "../browser/session.js";
 import { generatePath, addRandomOffset, type Point } from "./path.js";
-import { calculateKeyDelays, calculateScrollSteps, type TypingProfile, type ScrollOptions } from "./timing.js";
+import { calculateKeyDelays, calculateScrollSteps, type TypingProfile } from "./timing.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -20,175 +26,75 @@ function rand(min: number, max: number): number {
   return min + Math.random() * (max - min);
 }
 
-function errorToString(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  if (typeof e === "string") return e;
-  try { return JSON.stringify(e); } catch { return String(e); }
+function isUpperCase(ch: string): boolean {
+  return ch !== ch.toLowerCase() && ch === ch.toUpperCase();
 }
 
-// ── CDP key code mapping ─────────────────────────────────────────────
+// ── Mouse position tracking ──────────────────────────────────────────
 
-interface KeyDef {
-  key: string;
-  code: string;
-  keyCode: number;
-  text?: string;
-}
-
-const SPECIAL_KEYS: Record<string, KeyDef> = {
-  Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
-  Tab: { key: "Tab", code: "Tab", keyCode: 9, text: "\t" },
-  Enter: { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
-  Shift: { key: "Shift", code: "ShiftLeft", keyCode: 16 },
-  Escape: { key: "Escape", code: "Escape", keyCode: 27 },
-  " ": { key: " ", code: "Space", keyCode: 32, text: " " },
-};
-
-function charToKeyDef(ch: string): KeyDef {
-  if (SPECIAL_KEYS[ch]) return SPECIAL_KEYS[ch];
-
-  const lower = ch.toLowerCase();
-  const isUpper = ch !== lower && ch === ch.toUpperCase();
-
-  // Letters
-  if (lower >= "a" && lower <= "z") {
-    return {
-      key: ch,
-      code: `Key${lower.toUpperCase()}`,
-      keyCode: lower.charCodeAt(0) - 32, // 'a' → 65
-      text: ch,
-    };
-  }
-
-  // Digits
-  if (ch >= "0" && ch <= "9") {
-    return {
-      key: ch,
-      code: `Digit${ch}`,
-      keyCode: ch.charCodeAt(0),
-      text: ch,
-    };
-  }
-
-  // Punctuation / other — use generic mapping
-  return {
-    key: ch,
-    code: "",
-    keyCode: ch.charCodeAt(0),
-    text: ch,
-  };
-}
-
-// ── Target resolution ────────────────────────────────────────────────
-
-async function getChromeTargetPort(targetId: string): Promise<number> {
-  const chrome = interceptorManager.get("chrome");
-  if (!chrome) throw new Error("Chrome interceptor not registered.");
-
-  const meta = await chrome.getMetadata();
-  const target = meta.activeTargets.find((t) => t.id === targetId);
-  if (!target) throw new Error(`Chrome target '${targetId}' not found. Is it still running?`);
-
-  const details = target.details as Record<string, unknown>;
-  const port = details?.port;
-  if (typeof port !== "number" || !Number.isFinite(port) || port <= 0) {
-    throw new Error(`Chrome target '${targetId}' has no valid CDP port.`);
-  }
-  return port;
-}
-
-function targetUrlIsUserPage(url: unknown): boolean {
-  if (typeof url !== "string") return false;
-  const lower = url.toLowerCase();
-  return lower.length > 0 && !lower.startsWith("devtools://") && !lower.startsWith("chrome://");
-}
-
-async function getPageWsUrl(port: number): Promise<string> {
-  const targets = await getCdpTargets(port, { timeoutMs: 2000 });
-  const pages = targets.filter((t) => t.type === "page");
-  if (pages.length === 0) throw new Error("No page targets available.");
-
-  const selected = pages.find((t) => targetUrlIsUserPage(t.url)) ?? pages[0];
-  const wsUrl = selected.webSocketDebuggerUrl;
-  if (typeof wsUrl !== "string" || !wsUrl) {
-    throw new Error("Page target has no webSocketDebuggerUrl.");
-  }
-  return wsUrl;
-}
-
-// ── Bounding rect resolution ─────────────────────────────────────────
-
-interface BoundingRect {
+interface MouseState {
   x: number;
   y: number;
-  width: number;
-  height: number;
 }
 
-async function resolveSelectorBounds(
-  session: CdpSession,
-  selector: string,
-): Promise<BoundingRect> {
-  const result = await session.send("Runtime.evaluate", {
-    expression: `(() => {
-      const el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return { error: "Element not found: ${selector.replace(/"/g, '\\"')}" };
-      const r = el.getBoundingClientRect();
-      return { x: r.x, y: r.y, width: r.width, height: r.height };
-    })()`,
-    returnByValue: true,
-    awaitPromise: false,
-  });
+const mouseStates = new Map<string, MouseState>();
 
-  const remote = result.result as Record<string, unknown> | undefined;
-  const value = remote?.value as Record<string, unknown> | undefined;
-  if (!value || value.error) {
-    throw new Error(typeof value?.error === "string" ? value.error : `Failed to resolve selector: ${selector}`);
+function getMouseState(targetId: string): MouseState {
+  let state = mouseStates.get(targetId);
+  if (!state) {
+    state = { x: 0, y: 0 };
+    mouseStates.set(targetId, state);
   }
+  return state;
+}
 
+function clearMouseState(targetId: string): void {
+  mouseStates.delete(targetId);
+}
+
+// ── Locator resolution ───────────────────────────────────────────────
+
+export interface ClickTarget {
+  selector?: string;
+  role?: string;
+  name?: string;
+  text?: string;
+  label?: string;
+  x?: number;
+  y?: number;
+}
+
+function resolveLocator(page: Page, opts: ClickTarget): Locator | null {
+  if (opts.selector) return page.locator(opts.selector);
+  if (opts.role) {
+    // Playwright requires role to be a known AriaRole; we accept any string.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return page.getByRole(opts.role as any, opts.name ? { name: opts.name } : undefined);
+  }
+  if (opts.text) return page.getByText(opts.text);
+  if (opts.label) return page.getByLabel(opts.label);
+  return null;
+}
+
+async function resolveCenter(locator: Locator): Promise<{ center: Point; box: { width: number; height: number } }> {
+  await locator.waitFor({ state: "visible", timeout: 15_000 });
+  await locator.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => { /* non-fatal */ });
+  const box = await locator.boundingBox({ timeout: 5_000 });
+  if (!box) {
+    throw new Error("Locator has no bounding box (element not rendered or zero-size).");
+  }
   return {
-    x: Number(value.x),
-    y: Number(value.y),
-    width: Number(value.width),
-    height: Number(value.height),
+    center: { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+    box: { width: box.width, height: box.height },
   };
 }
 
 // ── Engine ───────────────────────────────────────────────────────────
 
-interface TargetState {
-  session: CdpSession;
-  mouseX: number;
-  mouseY: number;
-}
-
 class HumanizerEngine {
-  private _targets = new Map<string, TargetState>();
-
-  /** Get or create a persistent CdpSession for a target. */
-  async getSession(targetId: string): Promise<TargetState> {
-    const existing = this._targets.get(targetId);
-    if (existing && !existing.session.closed) return existing;
-
-    // Clean up stale entry
-    if (existing) this._targets.delete(targetId);
-
-    const port = await getChromeTargetPort(targetId);
-    const wsUrl = await getPageWsUrl(port);
-    const session = await CdpSession.open(wsUrl);
-
-    const state: TargetState = { session, mouseX: 0, mouseY: 0 };
-    this._targets.set(targetId, state);
-    return state;
-  }
-
-  /** Close the CdpSession for a target. */
+  /** Drop tracked mouse state when a target is closed. */
   closeSession(targetId: string): void {
-    const state = this._targets.get(targetId);
-    if (state) {
-      state.session.close();
-      this._targets.delete(targetId);
-    }
+    clearMouseState(targetId);
   }
 
   // ── Mouse movement ─────────────────────────────────────────────
@@ -199,38 +105,27 @@ class HumanizerEngine {
     y: number,
     durationMs?: number,
   ): Promise<{ totalMs: number; eventsDispatched: number }> {
-    const state = await this.getSession(targetId);
-    const from: Point = { x: state.mouseX, y: state.mouseY };
+    const page = getPageForTarget(targetId);
+    const state = getMouseState(targetId);
+    const from: Point = { x: state.x, y: state.y };
     const to: Point = { x, y };
 
-    const path = generatePath(from, to, {
-      baseDurationMs: durationMs ?? 600,
-    });
+    const path = generatePath(from, to, { baseDurationMs: durationMs ?? 600 });
 
     let eventsDispatched = 0;
     for (let i = 0; i < path.points.length; i++) {
       const pt = path.points[i];
-
-      // Wait inter-point delay
       if (i > 0) {
         const delay = path.timestamps[i] - path.timestamps[i - 1];
         if (delay > 0) await sleep(delay);
       }
-
-      await state.session.send("Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        x: pt.x,
-        y: pt.y,
-        button: "none",
-        buttons: 0,
-      });
+      await page.mouse.move(pt.x, pt.y);
       eventsDispatched++;
     }
 
-    // Update tracked position
-    const lastPt = path.points[path.points.length - 1];
-    state.mouseX = lastPt.x;
-    state.mouseY = lastPt.y;
+    const last = path.points[path.points.length - 1];
+    state.x = last.x;
+    state.y = last.y;
 
     return { totalMs: path.totalMs, eventsDispatched };
   }
@@ -239,80 +134,57 @@ class HumanizerEngine {
 
   async click(
     targetId: string,
-    opts: {
-      selector?: string;
-      x?: number;
-      y?: number;
+    opts: ClickTarget & {
       button?: "left" | "right" | "middle";
       clickCount?: number;
       moveDurationMs?: number;
     } = {},
-  ): Promise<{ totalMs: number; eventsDispatched: number; clickedAt: Point }> {
-    const state = await this.getSession(targetId);
+  ): Promise<{ totalMs: number; eventsDispatched: number; clickedAt: Point; resolvedBy: string }> {
+    const page = getPageForTarget(targetId);
     const button = opts.button ?? "left";
     const clickCount = opts.clickCount ?? 1;
 
     let targetX: number;
     let targetY: number;
+    let resolvedBy: string;
 
-    if (opts.selector) {
-      const bounds = await resolveSelectorBounds(state.session, opts.selector);
-      const center: Point = {
-        x: bounds.x + bounds.width / 2,
-        y: bounds.y + bounds.height / 2,
-      };
-      const offset = addRandomOffset(center, bounds);
+    const locator = resolveLocator(page, opts);
+    if (locator) {
+      const { center, box } = await resolveCenter(locator);
+      const offset = addRandomOffset(center, box);
       targetX = offset.x;
       targetY = offset.y;
+      resolvedBy = opts.selector ? "selector"
+        : opts.role ? "role"
+        : opts.text ? "text"
+        : "label";
     } else if (opts.x !== undefined && opts.y !== undefined) {
       targetX = opts.x;
       targetY = opts.y;
+      resolvedBy = "coords";
     } else {
-      throw new Error("Either selector or x+y coordinates are required.");
+      throw new Error("Provide one of: selector, role (+ name), text, label, or x+y coordinates.");
     }
 
-    // Move to target
     const moveResult = await this.moveMouse(targetId, targetX, targetY, opts.moveDurationMs);
     let eventsDispatched = moveResult.eventsDispatched;
     let totalMs = moveResult.totalMs;
 
-    const cdpButton = button === "right" ? "right" : button === "middle" ? "middle" : "left";
-    const buttons = button === "right" ? 2 : button === "middle" ? 4 : 1;
-
-    // Small pause before clicking (human hesitation)
     const preClickDelay = Math.round(rand(30, 80));
     await sleep(preClickDelay);
     totalMs += preClickDelay;
 
     for (let c = 0; c < clickCount; c++) {
-      // mousePressed
-      await state.session.send("Input.dispatchMouseEvent", {
-        type: "mousePressed",
-        x: targetX,
-        y: targetY,
-        button: cdpButton,
-        buttons,
-        clickCount: c + 1,
-      });
+      await page.mouse.down({ button });
       eventsDispatched++;
 
-      // Brief hold
       const holdMs = Math.round(rand(40, 100));
       await sleep(holdMs);
       totalMs += holdMs;
 
-      // mouseReleased
-      await state.session.send("Input.dispatchMouseEvent", {
-        type: "mouseReleased",
-        x: targetX,
-        y: targetY,
-        button: cdpButton,
-        buttons: 0,
-        clickCount: c + 1,
-      });
+      await page.mouse.up({ button });
       eventsDispatched++;
 
-      // Inter-click pause for multi-click
       if (c < clickCount - 1) {
         const interClickMs = Math.round(rand(50, 120));
         await sleep(interClickMs);
@@ -320,7 +192,7 @@ class HumanizerEngine {
       }
     }
 
-    return { totalMs, eventsDispatched, clickedAt: { x: targetX, y: targetY } };
+    return { totalMs, eventsDispatched, clickedAt: { x: targetX, y: targetY }, resolvedBy };
   }
 
   // ── Typing ─────────────────────────────────────────────────────
@@ -330,84 +202,39 @@ class HumanizerEngine {
     text: string,
     profile: TypingProfile = {},
   ): Promise<{ totalMs: number; eventsDispatched: number; charsTyped: number }> {
-    const state = await this.getSession(targetId);
+    const page = getPageForTarget(targetId);
     const keyDelays = calculateKeyDelays(text, profile);
 
     let totalMs = 0;
     let eventsDispatched = 0;
 
     for (const { key, delayMs } of keyDelays) {
-      // Wait before keystroke
       await sleep(delayMs);
       totalMs += delayMs;
 
-      const keyDef = charToKeyDef(key);
-      const needsShift = key !== key.toLowerCase() && key === key.toUpperCase() && key.length === 1;
-
-      // Shift down if needed
-      if (needsShift) {
-        await state.session.send("Input.dispatchKeyEvent", {
-          type: "keyDown",
-          key: "Shift",
-          code: "ShiftLeft",
-          windowsVirtualKeyCode: 16,
-          nativeVirtualKeyCode: 16,
-          modifiers: 8, // shift modifier
-        });
+      if (key === "Backspace") {
+        await page.keyboard.press("Backspace");
+        eventsDispatched++;
+      } else if (key === " ") {
+        await page.keyboard.press("Space");
+        eventsDispatched++;
+      } else if (key.length === 1) {
+        // Shift is handled automatically by Playwright's keyboard.type for single chars.
+        if (isUpperCase(key)) {
+          await page.keyboard.press(`Shift+${key.toLowerCase()}`);
+        } else {
+          await page.keyboard.press(key);
+        }
+        eventsDispatched++;
+      } else {
+        // Named key (Tab, Enter, etc.)
+        await page.keyboard.press(key);
         eventsDispatched++;
       }
 
-      // keyDown (no text — character insertion happens via the char event)
-      await state.session.send("Input.dispatchKeyEvent", {
-        type: "keyDown",
-        key: keyDef.key,
-        code: keyDef.code,
-        windowsVirtualKeyCode: keyDef.keyCode,
-        nativeVirtualKeyCode: keyDef.keyCode,
-        ...(needsShift ? { modifiers: 8 } : {}),
-      });
-      eventsDispatched++;
-
-      // char event for text-producing keys
-      if (keyDef.text) {
-        await state.session.send("Input.dispatchKeyEvent", {
-          type: "char",
-          key: keyDef.key,
-          code: keyDef.code,
-          text: keyDef.text,
-          unmodifiedText: keyDef.text,
-          ...(needsShift ? { modifiers: 8 } : {}),
-        });
-        eventsDispatched++;
-      }
-
-      // Brief key hold
       const holdMs = Math.round(rand(20, 60));
       await sleep(holdMs);
       totalMs += holdMs;
-
-      // keyUp
-      await state.session.send("Input.dispatchKeyEvent", {
-        type: "keyUp",
-        key: keyDef.key,
-        code: keyDef.code,
-        windowsVirtualKeyCode: keyDef.keyCode,
-        nativeVirtualKeyCode: keyDef.keyCode,
-        ...(needsShift ? { modifiers: 8 } : {}),
-      });
-      eventsDispatched++;
-
-      // Shift up if needed
-      if (needsShift) {
-        await state.session.send("Input.dispatchKeyEvent", {
-          type: "keyUp",
-          key: "Shift",
-          code: "ShiftLeft",
-          windowsVirtualKeyCode: 16,
-          nativeVirtualKeyCode: 16,
-        });
-        eventsDispatched++;
-      }
     }
 
     return { totalMs, eventsDispatched, charsTyped: text.length };
@@ -421,29 +248,17 @@ class HumanizerEngine {
     deltaX?: number,
     durationMs?: number,
   ): Promise<{ totalMs: number; eventsDispatched: number }> {
-    const state = await this.getSession(targetId);
-    const scrollSteps = calculateScrollSteps({
-      deltaY,
-      deltaX,
-      durationMs: durationMs ?? 400,
-    });
+    const page = getPageForTarget(targetId);
+    const steps = calculateScrollSteps({ deltaY, deltaX, durationMs: durationMs ?? 400 });
 
     let totalMs = 0;
     let eventsDispatched = 0;
 
-    for (const step of scrollSteps) {
+    for (const step of steps) {
       await sleep(step.delayMs);
       totalMs += step.delayMs;
 
-      await state.session.send("Input.dispatchMouseEvent", {
-        type: "mouseWheel",
-        x: state.mouseX,
-        y: state.mouseY,
-        deltaX: step.deltaX,
-        deltaY: step.deltaY,
-        button: "none",
-        buttons: 0,
-      });
+      await page.mouse.wheel(step.deltaX, step.deltaY);
       eventsDispatched++;
     }
 
@@ -457,7 +272,8 @@ class HumanizerEngine {
     durationMs: number,
     intensity: "subtle" | "normal" = "subtle",
   ): Promise<{ totalMs: number; eventsDispatched: number }> {
-    const state = await this.getSession(targetId);
+    const page = getPageForTarget(targetId);
+    const state = getMouseState(targetId);
     const start = Date.now();
     let eventsDispatched = 0;
 
@@ -473,41 +289,21 @@ class HumanizerEngine {
       );
       await sleep(waitMs);
       elapsed = Date.now() - start;
-
       if (elapsed >= durationMs) break;
 
-      // Random action: micro mouse jitter or micro scroll
       if (Math.random() < scrollChance) {
-        // Micro scroll
         const microDelta = Math.round(rand(-20, 20));
         if (microDelta !== 0) {
-          await state.session.send("Input.dispatchMouseEvent", {
-            type: "mouseWheel",
-            x: state.mouseX,
-            y: state.mouseY,
-            deltaX: 0,
-            deltaY: microDelta,
-            button: "none",
-            buttons: 0,
-          });
+          await page.mouse.wheel(0, microDelta);
           eventsDispatched++;
         }
       } else {
-        // Mouse jitter
-        const jx = Math.round(state.mouseX + rand(-jitterRadius, jitterRadius));
-        const jy = Math.round(state.mouseY + rand(-jitterRadius, jitterRadius));
-
-        await state.session.send("Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: jx,
-          y: jy,
-          button: "none",
-          buttons: 0,
-        });
+        const jx = Math.round(state.x + rand(-jitterRadius, jitterRadius));
+        const jy = Math.round(state.y + rand(-jitterRadius, jitterRadius));
+        await page.mouse.move(jx, jy);
+        state.x = jx;
+        state.y = jy;
         eventsDispatched++;
-
-        state.mouseX = jx;
-        state.mouseY = jy;
       }
     }
 
@@ -515,5 +311,4 @@ class HumanizerEngine {
   }
 }
 
-/** Singleton humanizer engine instance. */
 export const humanizerEngine = new HumanizerEngine();

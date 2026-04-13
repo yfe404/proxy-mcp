@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.0.0
+
+### Breaking Changes
+
+- **Browser stack swap: `chrome-launcher` + CDP → `cloakbrowser` + Playwright.** Stealth-patched Chromium with source-level C++ fingerprint patches replaces the hand-rolled stealth script + `chrome-devtools-mcp` sidecar. `humanize: true` on by default.
+- **Tools renamed.** All `interceptor_chrome_*` tools are now `interceptor_browser_*`. The 14 `interceptor_chrome_devtools_*` tools are collapsed onto 9 Playwright-driven equivalents:
+  - `interceptor_chrome_launch` → `interceptor_browser_launch`
+  - `interceptor_chrome_close` → `interceptor_browser_close`
+  - `interceptor_chrome_navigate` → `interceptor_browser_navigate`
+  - `interceptor_chrome_devtools_{snapshot,screenshot,list_console,list_cookies,get_cookie,list_storage_keys,get_storage_value,list_network_fields,get_network_field}` → `interceptor_browser_*`
+- **Tools removed.** `interceptor_chrome_cdp_info`, `interceptor_chrome_devtools_{pull_sidecar,attach,detach,navigate,list_network}` are gone. There is no CDP surface and no session-binding step — tools take `target_id` directly. Network listing is now sourced from MITM proxy capture (always on).
+- **Resources renamed.** `proxy://chrome/primary` → `proxy://browser/primary`, `proxy://chrome/targets` → `proxy://browser/targets`. `proxy://chrome/devtools/sessions` and the `proxy://chrome/{target_id}/cdp` template are removed.
+- **Tool count: 77 → 71.**
+
+### New Features
+
+- **Locator-based `humanizer_click`.** No more guessing pixel coordinates. Accepts `selector` (CSS/XPath), `role` + `name`, `text`, or `label`. Auto-waits for visible + enabled + stable + in-view before clicking. Falls back to raw `x, y` if no locator is given.
+- **ARIA snapshots.** `interceptor_browser_snapshot` returns a YAML-formatted role tree (via Playwright `locator.ariaSnapshot`), purpose-built for LLM page understanding.
+- **Buffered console logging.** `interceptor_browser_list_console` reads from a per-target in-memory buffer populated by Playwright's `page.on("console", ...)` — no session binding needed.
+
+### Dependencies
+
+- Added: `cloakbrowser@^0.3.24`, `playwright-core@^1.59`.
+- Removed: `chrome-launcher`, `chrome-devtools-mcp` (dynamic).
+- Node requirement raised to `>=20` (cloakbrowser).
+
+### Migration
+
+- Replace `interceptor_chrome_launch` calls with `interceptor_browser_launch` (drop `browser` variant arg; cloakbrowser is the only browser).
+- Replace the attach → call → detach pattern from the old sidecar flow with direct `target_id` parameters.
+- CDP-specific fields in `details` (`port`, `cdpHttpUrl`, etc.) are gone; targets expose `url`, `headless`, `humanize`, etc.
+- Custom stealth script injection is redundant — cloakbrowser handles it at the C++ level.
+
 ## 1.2.0
 
 ### New Features

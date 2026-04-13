@@ -3,6 +3,7 @@
  * Proxy MCP Server — entry point.
  *
  * HTTPS MITM proxy via mockttp with lifecycle/rules/traffic/TLS/interceptors/session tools and resources.
+ * Browser automation via cloakbrowser (stealth Chromium, Playwright API).
  * Tools organized into 10 modules:
  *   lifecycle, upstream, rules, traffic, modification, tls, interceptors, devtools, sessions, humanizer
  *
@@ -51,7 +52,7 @@ function arg(name: string, fallback: string): string {
 /* ------------------------------------------------------------------ */
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "proxy", version: "1.0.0" });
+  const server = new McpServer({ name: "proxy", version: "2.0.0" });
 
   initInterceptors();
 

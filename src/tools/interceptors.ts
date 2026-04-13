@@ -1,9 +1,9 @@
 /**
- * Interceptor tools — 18 MCP tools for auto-attaching to Chrome, Android, Docker, and processes.
+ * Interceptor tools — MCP tools for auto-attaching to Browser, Android, Docker, and processes.
  *
  * Organized into 6 groups:
  *   Discovery (3): list, status, deactivate_all
- *   Chrome (4): launch, cdp_info, navigate, close
+ *   Browser (3): launch, navigate, close
  *   Terminal (2): spawn, kill
  *   Android ADB (4): devices, setup, activate, deactivate
  *   Android Frida (3): apps, attach, detach
@@ -17,8 +17,7 @@ import { interceptorManager } from "../interceptors/manager.js";
 import type { TerminalInterceptor } from "../interceptors/terminal.js";
 import type { AndroidAdbInterceptor } from "../interceptors/android-adb.js";
 import type { AndroidFridaInterceptor } from "../interceptors/android-frida.js";
-import { getCdpBaseUrl, getCdpTargets, getCdpTargetsUrl, getCdpVersionUrl, sendCdpCommand, waitForCdpVersion } from "../cdp-utils.js";
-import { devToolsBridge } from "../devtools/bridge.js";
+import { getPageForTarget } from "../browser/session.js";
 import { truncateResult } from "../utils.js";
 
 /** Robust error-to-string — handles Error, plain objects (e.g. DBus errors), and primitives. */
@@ -26,7 +25,6 @@ function errorToString(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   if (e && typeof e === "object") {
-    // DBus/frida-js errors are often plain objects with message/name/description fields
     const obj = e as Record<string, unknown>;
     if (obj.message) return String(obj.message);
     if (obj.description) return String(obj.description);
@@ -36,7 +34,6 @@ function errorToString(e: unknown): string {
   return String(e);
 }
 
-/** Helper — require proxy running and return port + cert info. */
 function requireProxy(): { proxyPort: number; certPem: string; certFingerprint: string } {
   if (!proxyManager.isRunning()) {
     throw new Error("Proxy is not running. Start it first with proxy_start.");
@@ -71,7 +68,7 @@ export function registerInterceptorTools(server: McpServer): void {
 
   server.tool(
     "interceptor_list",
-    "List all interceptors with their availability and active targets. Shows Chrome, Terminal, Android ADB, Android Frida, and Docker interceptors.",
+    "List all interceptors with their availability and active targets. Shows Browser, Terminal, Android ADB, Android Frida, and Docker interceptors.",
     {},
     async () => {
       try {
@@ -96,7 +93,7 @@ export function registerInterceptorTools(server: McpServer): void {
     "interceptor_status",
     "Get detailed status of a specific interceptor, including all active targets and their details.",
     {
-      interceptor_id: z.string().describe("Interceptor ID (e.g., 'chrome', 'terminal', 'android-adb', 'android-frida', 'docker')"),
+      interceptor_id: z.string().describe("Interceptor ID (e.g., 'browser', 'terminal', 'android-adb', 'android-frida', 'docker')"),
     },
     async ({ interceptor_id }) => {
       try {
@@ -119,11 +116,10 @@ export function registerInterceptorTools(server: McpServer): void {
 
   server.tool(
     "interceptor_deactivate_all",
-    "Kill ALL active interceptors across all types. Emergency cleanup — stops all Chrome instances, kills spawned processes, removes ADB tunnels, detaches Frida, cleans Docker.",
+    "Kill ALL active interceptors across all types. Emergency cleanup — stops all browser instances, kills spawned processes, removes ADB tunnels, detaches Frida, cleans Docker.",
     {},
     async () => {
       try {
-        await devToolsBridge.closeAllSessions().catch(() => {});
         await interceptorManager.deactivateAll();
         return {
           content: [{
@@ -138,31 +134,39 @@ export function registerInterceptorTools(server: McpServer): void {
   );
 
   // ──────────────────────────────────────────
-  // Chrome (4 tools)
+  // Browser (3 tools)
   // ──────────────────────────────────────────
 
   server.tool(
-    "interceptor_chrome_launch",
-    "Launch Chrome/Chromium with proxy flags and SPKI certificate trust. Uses isolated temp profile. Traffic automatically flows through the MITM proxy.",
+    "interceptor_browser_launch",
+    "Launch cloakbrowser (stealth Chromium) with proxy flags and SPKI certificate trust. Built-in source-level fingerprint patches + humanize mode. Driven via Playwright — locator-based tools replace CDP.",
     {
       url: z.string().optional().describe("URL to open (default: about:blank)"),
-      browser: z.enum(["chrome", "chromium", "brave", "edge"]).optional().default("chrome")
-        .describe("Browser variant to launch"),
-      incognito: z.boolean().optional().default(false).describe("Launch in incognito mode"),
+      headless: z.boolean().optional().default(false).describe("Run headless (default: false)"),
+      humanize: z.boolean().optional().default(true).describe("Enable cloakbrowser's humanize mode (default: true)"),
+      human_preset: z.enum(["default", "careful"]).optional().default("default")
+        .describe("Human behavior preset"),
+      timezone: z.string().optional().describe("IANA timezone, e.g. 'America/New_York'"),
+      locale: z.string().optional().describe("BCP 47 locale, e.g. 'en-US'"),
+      viewport_width: z.number().optional().describe("Viewport width in px"),
+      viewport_height: z.number().optional().describe("Viewport height in px"),
     },
-    async ({ url, browser, incognito }) => {
+    async ({ url, headless, humanize, human_preset, timezone, locale, viewport_width, viewport_height }) => {
       try {
         const proxyInfo = requireProxy();
+        const viewport = (viewport_width && viewport_height)
+          ? { width: viewport_width, height: viewport_height }
+          : undefined;
 
-        // Always launch in stealth mode: minimal flags + CDP stealth patches.
-        // Chrome keeps its real UA so in-page bot sensors see capabilities that
-        // match the actual browser version.
-        const result = await interceptorManager.activate("chrome", {
+        const result = await interceptorManager.activate("browser", {
           ...proxyInfo,
           url,
-          browser,
-          incognito,
-          stealthMode: true,
+          headless,
+          humanize,
+          humanPreset: human_preset,
+          timezone,
+          locale,
+          viewport,
         });
         return {
           content: [{
@@ -177,181 +181,27 @@ export function registerInterceptorTools(server: McpServer): void {
   );
 
   server.tool(
-    "interceptor_chrome_cdp_info",
-    "Get CDP endpoints (HTTP + WebSocket) and tab targets for a Chrome instance launched by interceptor_chrome_launch. Useful for attaching Playwright/DevTools.",
+    "interceptor_browser_navigate",
+    "Navigate the browser target's page via Playwright and optionally wait for matching host traffic to be captured by the proxy.",
     {
-      target_id: z.string().describe("Target ID from interceptor_chrome_launch"),
-      include_targets: z.boolean().optional().default(true).describe("Include /json/list targets (default: true)"),
-      timeout_ms: z.number().optional().default(3000).describe("Total time to wait for CDP readiness (default: 3000ms)"),
-      retry_interval_ms: z.number().optional().default(200).describe("Retry interval while waiting for CDP (default: 200ms)"),
-    },
-    async ({ target_id, include_targets, timeout_ms, retry_interval_ms }) => {
-      try {
-        const chrome = interceptorManager.get("chrome");
-        if (!chrome) {
-          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "Chrome interceptor not registered." }) }] };
-        }
-
-        const meta = await chrome.getMetadata();
-        const target = meta.activeTargets.find((t) => t.id === target_id);
-        if (!target) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({ status: "error", error: `Chrome target '${target_id}' not found. Is it still running?` }),
-            }],
-          };
-        }
-
-        // Chrome interceptor stores CDP port in details.port
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const details: any = target.details ?? {};
-        const port = details.port;
-        if (typeof port !== "number" || !Number.isFinite(port) || port <= 0) {
-          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `Chrome target '${target_id}' has no valid CDP port.` }) }] };
-        }
-
-        const httpUrl = getCdpBaseUrl(port);
-        const versionUrl = getCdpVersionUrl(port);
-        const targetsUrl = getCdpTargetsUrl(port);
-
-        const version = await waitForCdpVersion(port, {
-          timeoutMs: timeout_ms,
-          intervalMs: retry_interval_ms,
-          requestTimeoutMs: Math.min(1000, Math.max(100, retry_interval_ms)),
-        });
-        const ws = version.webSocketDebuggerUrl;
-
-        let targets: Array<Record<string, unknown>> | null = null;
-        let targetsError: string | null = null;
-        if (include_targets) {
-          try {
-            targets = await getCdpTargets(port, { timeoutMs: 1500 });
-          } catch (e) {
-            targetsError = errorToString(e);
-          }
-        }
-
-        return {
-          content: [{
-            type: "text",
-            text: truncateResult({
-              status: "success",
-              target_id,
-              cdp: {
-                httpUrl,
-                versionUrl,
-                targetsUrl,
-                version,
-                browserWebSocketDebuggerUrl: typeof ws === "string" ? ws : null,
-              },
-              targets,
-              ...(targetsError ? { targetsError } : {}),
-            }),
-          }],
-        };
-      } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
-      }
-    },
-  );
-
-  server.tool(
-    "interceptor_chrome_navigate",
-    "Navigate a tab in a specific Chrome instance launched by interceptor_chrome_launch using that instance's CDP target WebSocket. Prevents cross-instance mistakes when proxy capture is required.",
-    {
-      target_id: z.string().describe("Target ID from interceptor_chrome_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       url: z.string().describe("Destination URL"),
-      page_target_id: z.string().optional().describe("Optional page target ID from interceptor_chrome_cdp_info targets"),
+      wait_until: z.enum(["load", "domcontentloaded", "networkidle", "commit"]).optional().default("domcontentloaded")
+        .describe("Playwright wait condition (default: domcontentloaded)"),
       wait_for_proxy_capture: z.boolean().optional().default(true)
         .describe("Wait for matching proxy traffic after navigate (default: true)"),
-      timeout_ms: z.number().optional().default(5000).describe("Max wait for CDP response and proxy capture (default: 5000ms)"),
+      timeout_ms: z.number().optional().default(5000).describe("Max wait for navigation and proxy capture (default: 5000ms)"),
       poll_interval_ms: z.number().optional().default(200).describe("Polling interval while waiting for proxy capture (default: 200ms)"),
     },
-    async ({ target_id, url, page_target_id, wait_for_proxy_capture, timeout_ms, poll_interval_ms }) => {
+    async ({ target_id, url, wait_until, wait_for_proxy_capture, timeout_ms, poll_interval_ms }) => {
       try {
-        const chrome = interceptorManager.get("chrome");
-        if (!chrome) {
-          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "Chrome interceptor not registered." }) }] };
-        }
-
-        const meta = await chrome.getMetadata();
-        const target = meta.activeTargets.find((t) => t.id === target_id);
-        if (!target) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({ status: "error", error: `Chrome target '${target_id}' not found. Is it still running?` }),
-            }],
-          };
-        }
-
-        // Chrome interceptor stores CDP port in details.port
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const details: any = target.details ?? {};
-        const port = details.port;
-        if (typeof port !== "number" || !Number.isFinite(port) || port <= 0) {
-          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `Chrome target '${target_id}' has no valid CDP port.` }) }] };
-        }
-
-        await waitForCdpVersion(port, {
-          timeoutMs: timeout_ms,
-          intervalMs: Math.max(50, Math.min(500, poll_interval_ms)),
-          requestTimeoutMs: Math.min(1000, Math.max(100, poll_interval_ms)),
-        });
-
-        const cdpTargets = await getCdpTargets(port, { timeoutMs: Math.min(timeout_ms, 2000) });
-        const pageTargets = cdpTargets.filter((t) => t.type === "page");
-        if (pageTargets.length === 0) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({ status: "error", error: `No page targets available on Chrome target '${target_id}'.` }),
-            }],
-          };
-        }
-
-        let selectedTarget: Record<string, unknown> | undefined;
-        if (page_target_id) {
-          selectedTarget = pageTargets.find((t) => t.id === page_target_id);
-          if (!selectedTarget) {
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  status: "error",
-                  error: `Page target '${page_target_id}' not found on Chrome target '${target_id}'.`,
-                }),
-              }],
-            };
-          }
-        } else {
-          selectedTarget = pageTargets.find((t) => {
-            const tUrl = typeof t.url === "string" ? t.url.toLowerCase() : "";
-            return tUrl.length > 0 && !tUrl.startsWith("devtools://") && !tUrl.startsWith("chrome://");
-          }) ?? pageTargets[0];
-        }
-
-        const pageTargetWs = selectedTarget.webSocketDebuggerUrl;
-        if (typeof pageTargetWs !== "string" || pageTargetWs.length === 0) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({
-                status: "error",
-                error: `Selected page target has no webSocketDebuggerUrl on Chrome target '${target_id}'.`,
-              }),
-            }],
-          };
-        }
-
+        const page = getPageForTarget(target_id);
         const beforeCount = proxyManager.getTraffic().length;
-        const cdpResult = await sendCdpCommand(
-          pageTargetWs,
-          "Page.navigate",
-          { url },
-          { timeoutMs: timeout_ms },
-        );
+
+        const response = await page.goto(url, {
+          waitUntil: wait_until,
+          timeout: timeout_ms,
+        });
 
         const destinationHost = normalizeHostname(url);
         let matchedExchangeIds: string[] = [];
@@ -362,9 +212,8 @@ export function registerInterceptorTools(server: McpServer): void {
           const startedAt = Date.now();
           while (Date.now() - startedAt <= timeout_ms) {
             const delta = proxyManager.getTraffic().slice(beforeCount);
-            if (delta.length > 0) {
-              sawAnyNewTraffic = true;
-            }
+            if (delta.length > 0) sawAnyNewTraffic = true;
+
             if (destinationHost) {
               const matches = delta
                 .filter((x) => {
@@ -386,13 +235,12 @@ export function registerInterceptorTools(server: McpServer): void {
         }
 
         const delta = proxyManager.getTraffic().slice(beforeCount);
-        const response: Record<string, unknown> = {
+        const payload: Record<string, unknown> = {
           status: "success",
           target_id,
           url,
-          selected_page_target_id: selectedTarget.id ?? null,
-          selected_page_url: selectedTarget.url ?? null,
-          cdpResult,
+          http_status: response?.status() ?? null,
+          final_url: page.url(),
           traffic: {
             beforeCount,
             afterCount: beforeCount + delta.length,
@@ -405,17 +253,12 @@ export function registerInterceptorTools(server: McpServer): void {
         };
 
         if (wait_for_proxy_capture && destinationHost && matchedExchangeIds.length === 0) {
-          response.warning = sawAnyNewTraffic
+          payload.warning = sawAnyNewTraffic
             ? `Navigation succeeded but no '${destinationHost}' traffic was captured within ${timeout_ms}ms.`
             : `No new proxy traffic observed within ${timeout_ms}ms after navigation.`;
         }
 
-        return {
-          content: [{
-            type: "text",
-            text: truncateResult(response),
-          }],
-        };
+        return { content: [{ type: "text", text: truncateResult(payload) }] };
       } catch (e) {
         return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
       }
@@ -423,19 +266,18 @@ export function registerInterceptorTools(server: McpServer): void {
   );
 
   server.tool(
-    "interceptor_chrome_close",
-    "Close a Chrome instance launched by interceptor_chrome_launch.",
+    "interceptor_browser_close",
+    "Close a browser instance launched by interceptor_browser_launch.",
     {
-      target_id: z.string().describe("Target ID from interceptor_chrome_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
     },
     async ({ target_id }) => {
       try {
-        await devToolsBridge.closeSessionsByTarget(target_id).catch(() => {});
-        await interceptorManager.deactivate("chrome", target_id);
+        await interceptorManager.deactivate("browser", target_id);
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({ status: "success", message: `Chrome instance ${target_id} closed.` }),
+            text: JSON.stringify({ status: "success", message: `Browser instance ${target_id} closed.` }),
           }],
         };
       } catch (e) {
@@ -487,7 +329,6 @@ export function registerInterceptorTools(server: McpServer): void {
     },
     async ({ target_id }) => {
       try {
-        // Get output before killing
         const terminal = interceptorManager.get("terminal") as TerminalInterceptor | undefined;
         const output = terminal?.getProcessOutput(target_id);
 

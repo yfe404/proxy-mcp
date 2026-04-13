@@ -6,7 +6,6 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { proxyManager } from "../state.js";
 import { getLocalIP } from "../utils.js";
-import { devToolsBridge } from "../devtools/bridge.js";
 
 export function registerLifecycleTools(server: McpServer): void {
   server.tool(
@@ -66,7 +65,6 @@ export function registerLifecycleTools(server: McpServer): void {
     {},
     async () => {
       try {
-        await devToolsBridge.closeAllSessions().catch(() => {});
         await proxyManager.stop();
         return {
           content: [{

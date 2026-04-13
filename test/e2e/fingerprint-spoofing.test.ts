@@ -1,16 +1,18 @@
 /**
  * E2E fingerprint spoofing tests — success metrics for issue #2.
  *
- * Requirements: Chrome/Chromium, internet access.
+ * Requirements: cloakbrowser binary, internet access.
  *
- * These tests launch the full MCP server, start a proxy, enable fingerprint
- * spoofing via impit, launch Chrome, and navigate to real sites
- * to verify TLS/HTTP2 fingerprint fidelity.
+ * Launches the full MCP server, starts a proxy, enables fingerprint spoofing
+ * (for impit-based outbound), launches cloakbrowser via the browser
+ * interceptor, and drives the bound Playwright Page to verify TLS/HTTP2
+ * fingerprint fidelity at real sites.
  */
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 
+import type { Page } from "playwright-core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -26,8 +28,7 @@ import { registerDevToolsTools } from "../../src/tools/devtools.js";
 import { registerSessionTools } from "../../src/tools/sessions.js";
 import { registerResources } from "../../src/resources.js";
 import { initInterceptors } from "../../src/interceptors/init.js";
-
-import { CdpSession, getCdpTargets, waitForCdpVersion } from "../../src/cdp-utils.js";
+import { getPageForTarget } from "../../src/browser/session.js";
 
 // ── Helpers ──
 
@@ -44,13 +45,11 @@ function sleep(ms: number): Promise<void> {
 describe("E2E Fingerprint Spoofing", () => {
   let client: Client;
   let proxyPort: number;
-  let chromeTargetId: string;
-  let cdpPort: number;
-  let cdpSession: CdpSession;
+  let browserTargetId: string;
+  let page: Page;
   let browserleaksData: Record<string, unknown> | null = null;
 
   before(async () => {
-    // Set up MCP server + client
     const server = new McpServer({ name: "proxy-e2e", version: "1.0.0" });
     initInterceptors();
     registerLifecycleTools(server);
@@ -75,8 +74,9 @@ describe("E2E Fingerprint Spoofing", () => {
     );
     assert.equal(startRes.status, "success", `proxy_start failed: ${JSON.stringify(startRes)}`);
     proxyPort = startRes.port as number;
+    void proxyPort;
 
-    // Enable fingerprint spoofing with chrome_131 preset
+    // Enable outbound fingerprint spoofing (impit) with chrome_131 preset
     const spoofRes = parseToolResult(
       await client.callTool({
         name: "proxy_set_fingerprint_spoof",
@@ -85,66 +85,50 @@ describe("E2E Fingerprint Spoofing", () => {
     );
     assert.equal(spoofRes.status, "success", `fingerprint spoof failed: ${JSON.stringify(spoofRes)}`);
 
-    // Launch Chrome
-    const chromeRes = parseToolResult(
+    // Launch cloakbrowser via the browser interceptor
+    const browserRes = parseToolResult(
       await client.callTool({
-        name: "interceptor_chrome_launch",
-        arguments: { url: "about:blank" },
+        name: "interceptor_browser_launch",
+        arguments: { url: "about:blank", headless: false, humanize: true },
       }) as { content: Array<{ text: string }> },
     );
-    assert.equal(chromeRes.status, "success", `chrome launch failed: ${JSON.stringify(chromeRes)}`);
-    chromeTargetId = chromeRes.targetId as string;
-    const details = chromeRes.details as Record<string, unknown>;
-    cdpPort = details.port as number;
+    assert.equal(browserRes.status, "success", `browser launch failed: ${JSON.stringify(browserRes)}`);
+    browserTargetId = browserRes.targetId as string;
 
-    // Wait for CDP and open a persistent session
-    await waitForCdpVersion(cdpPort, { timeoutMs: 10_000 });
-    const targets = await getCdpTargets(cdpPort);
-    const pageTarget = targets.find((t) => t.type === "page") as Record<string, unknown> | undefined;
-    assert.ok(pageTarget, "No page target found");
-    const wsUrl = pageTarget.webSocketDebuggerUrl as string;
-    cdpSession = await CdpSession.open(wsUrl, { timeoutMs: 10_000 });
+    page = getPageForTarget(browserTargetId);
 
-    // Brief warm-up: navigate to a simple HTTPS page to establish connections.
-    // impit is in-process — no Docker cold-start needed.
-    cdpSession.send("Page.navigate", { url: "https://httpbin.org/get" }, { timeoutMs: 30_000 }).catch(() => {});
-    await sleep(5_000);
+    // Warm-up navigation
+    try {
+      await page.goto("https://httpbin.org/get", { waitUntil: "domcontentloaded", timeout: 30_000 });
+    } catch { /* non-fatal */ }
+    await sleep(2_000);
     await client.callTool({ name: "proxy_clear_traffic", arguments: {} });
   });
 
   after(async () => {
-    // Cleanup
-    try { cdpSession?.close(); } catch { /* */ }
     try {
-      if (chromeTargetId) {
+      if (browserTargetId) {
         await client.callTool({
-          name: "interceptor_chrome_close",
-          arguments: { target_id: chromeTargetId },
+          name: "interceptor_browser_close",
+          arguments: { target_id: browserTargetId },
         });
       }
     } catch { /* */ }
     try { await client.callTool({ name: "proxy_clear_ja3_spoof", arguments: {} }); } catch { /* */ }
     try { await client.callTool({ name: "proxy_stop", arguments: {} }); } catch { /* */ }
     try { await client.close(); } catch { /* */ }
-    // impit's native Rust connection pool keeps the event loop alive (no close() API).
-    // Force exit after cleanup since all assertions have already run.
+    // impit's native Rust pool keeps the event loop alive; force exit.
     setTimeout(() => process.exit(0), 1_000);
   });
 
   // ── Test 1: Barnes & Noble ──
 
   it("Barnes & Noble loads with spoofed fingerprint", { timeout: 120_000 }, async () => {
-    // Navigate to about:blank first to clear previous page state
-    await cdpSession.send("Page.navigate", { url: "about:blank" }, { timeoutMs: 5_000 }).catch(() => {});
+    await page.goto("about:blank").catch(() => {});
     await sleep(500);
 
-    // Step 1: Initial navigation — Akamai may return 403 with sensor JS challenge.
-    // The sensor script runs in Chrome, POSTs validation data, and solves the _abck cookie.
-    cdpSession.send("Page.navigate", { url: "https://www.barnesandnoble.com/" }, { timeoutMs: 60_000 }).catch(() => {});
+    page.goto("https://www.barnesandnoble.com/", { timeout: 60_000 }).catch(() => {});
 
-    // Poll until we see B&N traffic with a response.
-    // Use url_filter (not hostname_filter) because req.hostname can be empty
-    // for HTTPS requests handled via beforeRequest synthetic responses.
     let exchanges: Array<Record<string, unknown>> = [];
     for (let i = 0; i < 30; i++) {
       await sleep(2_000);
@@ -160,21 +144,14 @@ describe("E2E Fingerprint Spoofing", () => {
 
     assert.ok(exchanges.length > 0, "No traffic captured for barnesandnoble.com");
 
-    // Check if the first response was 403 (Akamai challenge)
     const firstDoc = exchanges.find((e) => typeof e.status === "number");
     assert.ok(firstDoc, "No completed exchange found");
     const firstStatus = firstDoc.status as number;
 
     if (firstStatus === 403) {
-      // Akamai challenge: wait for sensor JS to execute and solve the _abck cookie,
-      // then retry navigation.
-      await sleep(15_000); // Sensor script needs time to run + POST validation
-
-      // Clear traffic for clean retry observation
+      await sleep(15_000);
       await client.callTool({ name: "proxy_clear_traffic", arguments: {} });
-
-      // Step 2: Retry navigation — Chrome should now have a solved _abck cookie
-      cdpSession.send("Page.navigate", { url: "https://www.barnesandnoble.com/" }, { timeoutMs: 60_000 }).catch(() => {});
+      page.goto("https://www.barnesandnoble.com/", { timeout: 60_000 }).catch(() => {});
 
       let retryExchanges: Array<Record<string, unknown>> = [];
       for (let i = 0; i < 30; i++) {
@@ -193,18 +170,12 @@ describe("E2E Fingerprint Spoofing", () => {
       const retryDoc = retryExchanges.find((e) => typeof e.status === "number");
       assert.ok(retryDoc, "No completed retry exchange found");
       const retryStatus = retryDoc.status as number;
-      assert.ok(retryStatus >= 200 && retryStatus < 400, `Retry got ${retryStatus}, expected 2xx/3xx (Akamai challenge may not be solvable through proxy)`);
+      assert.ok(retryStatus >= 200 && retryStatus < 400, `Retry got ${retryStatus}, expected 2xx/3xx`);
     } else {
-      // Direct success — no Akamai challenge
       assert.ok(firstStatus >= 200 && firstStatus < 400, `Expected 2xx/3xx status, got ${firstStatus}`);
     }
 
-    // Verify page title doesn't indicate blocking
-    const evalResult = await cdpSession.send("Runtime.evaluate", {
-      expression: "document.title",
-      returnByValue: true,
-    }, { timeoutMs: 5_000 });
-    const title = ((evalResult.result as Record<string, unknown>)?.value as string || "").toLowerCase();
+    const title = (await page.title().catch(() => "")).toLowerCase();
     assert.ok(!title.includes("access denied"), `Page title indicates blocking: ${title}`);
     assert.ok(!title.includes("blocked"), `Page title indicates blocking: ${title}`);
   });
@@ -212,13 +183,11 @@ describe("E2E Fingerprint Spoofing", () => {
   // ── Test 2: Reddit ──
 
   it("Reddit loads without 403", { timeout: 90_000 }, async () => {
-    // Clear traffic from previous test
     await client.callTool({ name: "proxy_clear_traffic", arguments: {} });
 
-    cdpSession.send("Page.navigate", { url: "https://www.reddit.com/" }, { timeoutMs: 60_000 }).catch(() => {});
+    page.goto("https://www.reddit.com/", { timeout: 60_000 }).catch(() => {});
     await sleep(20_000);
 
-    // proxy_search_traffic returns summaries: { id, url, status, ... }
     const trafficRes = parseToolResult(
       await client.callTool({
         name: "proxy_search_traffic",
@@ -237,27 +206,19 @@ describe("E2E Fingerprint Spoofing", () => {
       assert.ok(status >= 200 && status < 400, `Expected 2xx/3xx, got ${status}`);
     }
 
-    // Verify page body doesn't indicate blocking
-    const evalResult = await cdpSession.send("Runtime.evaluate", {
-      expression: "document.body?.innerText?.substring(0, 500) || ''",
-      returnByValue: true,
-    }, { timeoutMs: 5_000 });
-    const bodyText = ((evalResult.result as Record<string, unknown>)?.value as string || "").toLowerCase();
+    const bodyText = (
+      await page.evaluate(() => document.body?.innerText?.substring(0, 500) || "").catch(() => "")
+    ).toLowerCase();
     assert.ok(!bodyText.includes("blocked by network security"), `Page body indicates blocking`);
   });
 
   // ── Test 3: browserleaks TLS data ──
 
   it("browserleaks TLS JSON has JA3 data", { timeout: 60_000 }, async () => {
-    cdpSession.send("Page.navigate", { url: "https://tls.browserleaks.com/json" }, { timeoutMs: 30_000 }).catch(() => {});
+    page.goto("https://tls.browserleaks.com/json", { timeout: 30_000 }).catch(() => {});
     await sleep(8_000);
 
-    // Extract JSON from the page body
-    const evalResult = await cdpSession.send("Runtime.evaluate", {
-      expression: "document.body?.innerText || ''",
-      returnByValue: true,
-    }, { timeoutMs: 5_000 });
-    const bodyText = (evalResult.result as Record<string, unknown>)?.value as string || "";
+    const bodyText = await page.evaluate(() => document.body?.innerText || "").catch(() => "");
 
     let tlsData: Record<string, unknown>;
     try {
@@ -266,10 +227,7 @@ describe("E2E Fingerprint Spoofing", () => {
       assert.fail(`Failed to parse browserleaks JSON: ${bodyText.substring(0, 200)}`);
     }
 
-    // Assert JA3 hash is present
     assert.ok(tlsData.ja3_hash || tlsData.ja3Hash || tlsData.ja3, "No JA3 hash in browserleaks data");
-
-    // Store for test 4
     browserleaksData = tlsData;
   });
 
@@ -278,7 +236,6 @@ describe("E2E Fingerprint Spoofing", () => {
   it("TLS 1.3 is negotiated (JA4 contains t13)", { timeout: 10_000 }, async () => {
     assert.ok(browserleaksData, "browserleaks data not available (test 3 must pass first)");
 
-    // Look for JA4 fingerprint containing t13 (TLS 1.3 indicator)
     const ja4 = (browserleaksData.ja4 || browserleaksData.ja4_hash || browserleaksData.ja4Hash || "") as string;
     assert.ok(ja4, "No JA4 fingerprint in browserleaks data");
     assert.ok(ja4.includes("t13"), `JA4 does not indicate TLS 1.3: ${ja4}`);
@@ -287,16 +244,10 @@ describe("E2E Fingerprint Spoofing", () => {
   // ── Test 5: BrowserScan bot detection ──
 
   it("BrowserScan bot detection passes", { timeout: 90_000 }, async () => {
-    cdpSession.send("Page.navigate", { url: "https://www.browserscan.net/bot-detection" }, { timeoutMs: 60_000 }).catch(() => {});
-    // Bot detection JS needs time to execute
+    page.goto("https://www.browserscan.net/bot-detection", { timeout: 60_000 }).catch(() => {});
     await sleep(20_000);
 
-    // Check navigator.webdriver
-    const evalResult = await cdpSession.send("Runtime.evaluate", {
-      expression: "navigator.webdriver",
-      returnByValue: true,
-    }, { timeoutMs: 5_000 });
-    const webdriver = (evalResult.result as Record<string, unknown>)?.value;
+    const webdriver = await page.evaluate(() => navigator.webdriver).catch(() => null);
     assert.equal(webdriver, false, `navigator.webdriver is ${webdriver}, expected false`);
   });
 });
