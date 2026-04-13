@@ -28,10 +28,9 @@ These are implemented and in the repo now:
   - `proxy://sessions/{session_id}/summary`
   - `proxy://sessions/{session_id}/timeline`
   - `proxy://sessions/{session_id}/findings`
-- CDP discovery resources:
-  - `proxy://chrome/primary`
-  - `proxy://chrome/{target_id}/cdp`
-  - `proxy://chrome/targets`
+- Browser discovery resources:
+  - `proxy://browser/primary`
+  - `proxy://browser/targets`
 
 ## Roadmap Principles
 
@@ -162,22 +161,12 @@ Acceptance criteria:
 Effort: M  
 Dependencies: replay engine, session indexing
 
-### 6) CDP Convenience Bridge
-Problem solved:
-- Eliminate manual CDP attach translation for agent workflows.
+### 6) ~~CDP Convenience Bridge~~ — OBSOLETED in 2.0.0
 
-Planned interface additions:
-- Tool: `proxy_chrome_attach_info`
-
-Functional requirements:
-- Return attach-ready payload (HTTP URL + WS URL + snippet)
-- Resolve from `proxy://chrome/primary` by default
-
-Acceptance criteria:
-- Agent can attach Playwright from single tool call
-
-Effort: S  
-Dependencies: current CDP resources (already shipped)
+Superseded by the cloakbrowser + Playwright rewrite. The browser interceptor
+now exposes a Playwright `Page` directly — no external CDP attach is needed.
+If external CDP/Playwright attach becomes a use case again, a future tool
+could launch cloakbrowser with `--remote-debugging-port` in `args`.
 
 ## Phase 3 (Reliability + Scale)
 

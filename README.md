@@ -1,8 +1,8 @@
 # proxy-mcp
 
-proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. It also ships "interceptors" to route Chrome, CLI tools, Docker containers, and Android devices/apps through the proxy.
+proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It captures requests/responses, lets you modify traffic in-flight (headers/bodies/mock/forward/drop), supports upstream proxy chaining, and records TLS fingerprints for connections to the proxy (JA3/JA4) plus optional upstream server JA3S. Ships "interceptors" to route a stealth browser (cloakbrowser, source-patched Chromium), CLI tools, Docker containers, and Android devices/apps through the proxy, plus Playwright-driven browser automation with locator-based click, typing, scroll, and ARIA snapshots.
 
-81 tools + 8 resources + 4 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp).
+71 tools + 6 resources + 3 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp) and [cloakbrowser](https://cloakbrowser.dev/).
 
 ## Table of Contents
 
@@ -18,10 +18,10 @@ proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It 
   - [Traffic Capture](#traffic-capture-4)
   - [Modification Shortcuts](#modification-shortcuts-3)
   - [TLS Fingerprinting](#tls-fingerprinting-9)
-  - [Interceptors](#interceptors-18)
-  - [DevTools Bridge](#devtools-bridge-14)
+  - [Interceptors](#interceptors-17)
+  - [Browser DevTools-equivalents](#browser-devtools-equivalents-9)
   - [Sessions](#sessions-13)
-  - [Humanizer](#humanizer--cdp-input-5)
+  - [Humanizer](#humanizer--playwright-input-5)
 - [Resources](#resources)
 - [Usage Example](#usage-example)
 - [Architecture](#architecture)
@@ -124,22 +124,23 @@ Use the returned `port` and endpoint `http://127.0.0.1:<port>`.
 
 ### 2) Browser setup (recommended: interceptor)
 
-Use the Chrome interceptor so proxy flags and cert trust are configured automatically:
+Use the browser interceptor so proxy flags and cert trust are configured automatically. Launches [cloakbrowser](https://cloakbrowser.dev/) — a stealth-patched Chromium with source-level C++ fingerprint patches and humanize mode on by default:
 
 ```bash
-interceptor_chrome_launch --url "https://example.com"
+interceptor_browser_launch --url "https://example.com"
 ```
 
-Then bind DevTools safely to that same target:
+Drive the page with Playwright-backed tools (no CDP, no sidecar — `target_id` is all you need):
 
 ```bash
-interceptor_chrome_devtools_attach --target_id "chrome_<pid>"
-interceptor_chrome_devtools_navigate --devtools_session_id "devtools_<id>" --url "https://apify.com"
+interceptor_browser_navigate --target_id "browser_<id>" --url "https://apify.com"
+interceptor_browser_snapshot  --target_id "browser_<id>"
+interceptor_browser_screenshot --target_id "browser_<id>" --file_path "/tmp/shot.png"
 ```
 
 ### 3) Browser setup (manual fallback)
 
-If launching Chrome manually, pass proxy flag yourself:
+If launching a browser manually, pass the proxy flag yourself:
 
 ```bash
 google-chrome --proxy-server="http://127.0.0.1:<port>"
@@ -209,16 +210,10 @@ proxy_search_traffic --query "example.com"
 ```
 
 Common issues:
-- Traffic from the wrong browser instance (fix: use `interceptor_chrome_devtools_attach`)
+- Traffic from the wrong browser instance (fix: always pass `target_id` from `interceptor_browser_launch`)
 - HTTPS cert trust missing on target
 - `NO_PROXY` bypassing expected hosts
-- `chrome-devtools-mcp` not installed (`ENOENT`): `interceptor_chrome_devtools_attach` falls back to navigation-only mode. Install `chrome-devtools-mcp` for full snapshot/network/console/screenshot support.
-
-Pull/install sidecar directly from MCP:
-
-```bash
-interceptor_chrome_devtools_pull_sidecar --version "0.2.2"
-```
+- First launch is slow: cloakbrowser downloads a ~200 MB stealth Chromium binary on first use (cached afterwards)
 
 ### 7) HAR import + replay
 
@@ -253,9 +248,9 @@ Note: imported HAR entries (and entries created by `proxy_replay_session`) do no
 - Can add, overwrite, or delete HTTP headers; outgoing header **order** can be controlled via fingerprint spoofing
 - Returns its own CA certificate — does **not** expose upstream server certificate chains
 
-### TLS ClientHello Passthrough (Chrome via interceptor)
+### TLS ClientHello Passthrough (browser via interceptor)
 
-When Chrome is launched via `interceptor_chrome_launch`, proxy-mcp forwards Chrome's **original TLS ClientHello** to the upstream server for document loads and same-origin sub-resource requests. The target server sees an authentic Chrome TLS fingerprint — not the proxy's.
+When cloakbrowser is launched via `interceptor_browser_launch`, proxy-mcp forwards the browser's **original TLS ClientHello** to the upstream server for document loads and same-origin sub-resource requests. The target server sees an authentic Chrome TLS fingerprint — not the proxy's.
 
 This is a key difference from typical MITM proxies (mitmproxy, Charles, Fiddler) which re-terminate TLS with their own fingerprint, making MITM trivially detectable by anti-bot systems via JA3/JA4 analysis.
 
@@ -273,55 +268,35 @@ proxy_list_tls_fingerprints --hostname_filter "example.com"
 
 | Traffic source | TLS behavior | Action needed |
 |---|---|---|
-| Chrome via `interceptor_chrome_launch` (document loads, same-origin) | Chrome's native ClientHello forwarded (passthrough) | None — fingerprint is authentic |
-| Chrome via `interceptor_chrome_launch` (cross-origin sub-resources, when spoof active) | Re-issued via impit with spoofed TLS | `proxy_set_fingerprint_spoof` with a browser preset |
+| cloakbrowser via `interceptor_browser_launch` (document loads, same-origin) | Browser's native ClientHello forwarded (passthrough) | None — fingerprint is authentic |
+| cloakbrowser via `interceptor_browser_launch` (cross-origin sub-resources, when spoof active) | Re-issued via impit with spoofed TLS | `proxy_set_fingerprint_spoof` with a browser preset |
 | Non-browser clients (curl, Python, `interceptor_spawn`) | Proxy's own TLS | `proxy_set_fingerprint_spoof` or `proxy_set_ja3_spoof` required |
 | HAR replay (`proxy_replay_session`) | Proxy's own TLS | `proxy_set_fingerprint_spoof` required |
 
-### Pairs well with CDP/Playwright
+### Built on cloakbrowser + Playwright
 
-Use CDP/Playwright for browser internals (DOM, JS execution, localStorage, cookie jar), and proxy-mcp for wire-level capture/manipulation + replay. They complement each other:
+Browser automation uses [cloakbrowser](https://cloakbrowser.dev/) — a stealth-patched Chromium with source-level C++ fingerprint patches — driven via Playwright. There is no CDP surface, no sidecar, no hand-rolled stealth script. One `target_id` from `interceptor_browser_launch` is everything downstream tools need.
 
-| Capability | CDP / Playwright | proxy-mcp |
-|---|---|---|
-| See/modify DOM, run JS in page | Yes | No |
-| Read cookies, localStorage, sessionStorage | Yes (browser internals) | Yes for proxy-launched Chrome via DevTools Bridge list/get tools; for any client, sees Cookie/Set-Cookie headers on the wire |
-| Capture HTTP request/response bodies | Yes for browser requests (protocol/size/streaming caveats) | Body previews only (4 KB cap, 1000-entry ring buffer) |
-| Modify requests in-flight (headers, body, mock, drop) | Via route/intercept handlers | Yes (declarative rules, hot-reload) |
-| Upstream proxy chaining (geo, auth) | Single browser via `--proxy-server` | Global + per-host upstreams across all clients (SOCKS4/5, HTTP, HTTPS, PAC) |
-| TLS fingerprint capture (JA3/JA4/JA3S) | No | Yes |
-| JA3 + HTTP/2 fingerprint spoofing | No | Proxy-side only (impit re-issues matching requests with spoofed TLS 1.3, HTTP/2 frames, and header order; does not alter the client's TLS handshake) |
-| Intercept non-browser traffic (curl, Python, Android apps) | No | Yes (interceptors) |
-| Human-like mouse/keyboard/scroll input | Via Playwright `page.mouse`/`page.keyboard` (instant, detectable timing) | Yes — CDP humanizer with Bezier curves, Fitts's law, WPM typing, eased scrolling |
+| Capability | proxy-mcp |
+|---|---|
+| See/modify DOM, run JS in page | Via `interceptor_browser_snapshot` + `interceptor_browser_list_storage_keys` (also reachable from custom scripts via `page.evaluate`) |
+| Read cookies, localStorage, sessionStorage | Yes — `interceptor_browser_list_cookies`, `interceptor_browser_list_storage_keys` |
+| Capture HTTP request/response bodies | Via the MITM proxy (4 KB preview cap by default; `full` capture profile on persisted sessions stores complete bodies) |
+| Modify requests in-flight (headers, body, mock, drop) | Yes (declarative rules, hot-reload) |
+| Upstream proxy chaining (geo, auth) | Global + per-host upstreams across all clients (SOCKS4/5, HTTP, HTTPS, PAC) |
+| TLS fingerprint capture (JA3/JA4/JA3S) | Yes |
+| JA3 + HTTP/2 fingerprint spoofing | Proxy-side (impit re-issues matching requests with spoofed TLS 1.3, HTTP/2 frames, and header order) |
+| Intercept non-browser traffic (curl, Python, Android apps) | Yes (interceptors) |
+| Human-like mouse/keyboard/scroll input | `humanizer_*` tools: Bezier curves + Fitts's law for mouse, WPM + bigram + typo model for typing, eased wheel scroll — layered on top of cloakbrowser's built-in humanize mode |
+| Locator-based interaction | `humanizer_click` accepts CSS/XPath selector, ARIA role + name, visible text, or form label — no pixel guessing |
 
-A typical combo: launch Chrome via `interceptor_chrome_launch` (routes through proxy automatically), drive pages with Playwright/CDP, and use proxy-mcp to capture the wire traffic, inject headers, or spoof JA3 — all in the same session. For behavioral realism, use `humanizer_*` tools instead of Playwright's instant `page.click()`/`page.type()` — they dispatch human-like CDP `Input.*` events with natural timing curves.
-
-**Attach Playwright to proxy-launched Chrome:**
-
-1. Call `proxy_start`
-2. Call `interceptor_chrome_launch`
-3. Read `proxy://chrome/primary` (or call `interceptor_chrome_cdp_info`) to get `cdp.httpUrl` (Playwright) and `cdp.browserWebSocketDebuggerUrl` (raw CDP clients)
-4. In Playwright:
-   ```ts
-   import { chromium } from "playwright";
-   const browser = await chromium.connectOverCDP("http://127.0.0.1:<cdp-port>");
-   ```
-
-**Proxy-safe built-in CDP flow (single-instance safe):**
+**Standard flow:**
 
 1. Call `proxy_start`
-2. Call `interceptor_chrome_launch`
-3. Call `interceptor_chrome_devtools_attach` with that `target_id`
-4. Call `interceptor_chrome_devtools_navigate` with `devtools_session_id`
-5. Call `proxy_search_traffic --query "<hostname>"` to confirm capture
-
-**Human-like input flow (bypasses bot detection):**
-
-1. Call `proxy_start`
-2. Optionally enable fingerprint spoofing: `proxy_set_fingerprint_spoof --preset chrome_136`
-3. Call `interceptor_chrome_launch --url "https://example.com"` (stealth mode auto-enabled when spoofing)
-4. Use `humanizer_move` / `humanizer_click` / `humanizer_type` / `humanizer_scroll` with the `target_id`
-5. Use `humanizer_idle` between actions to maintain natural presence
+2. Optionally enable outbound fingerprint spoofing for cross-origin sub-resources: `proxy_set_fingerprint_spoof --preset chrome_136`
+3. Call `interceptor_browser_launch --url "https://example.com"`
+4. Drive the page: `interceptor_browser_navigate`, `interceptor_browser_snapshot`, `humanizer_click --selector "..."`, `humanizer_type --text "..."`
+5. Inspect traffic: `proxy_search_traffic --query "<hostname>"`
 
 ## Tools Reference
 
@@ -396,9 +371,9 @@ proxy_test_rule_match --mode exchange --exchange_id "ex_abc123"
 | `proxy_list_fingerprint_presets` | List available browser fingerprint presets (e.g. `chrome_131`, `chrome_136`, `chrome_136_linux`, `firefox_133`) |
 | `proxy_check_fingerprint_runtime` | Check fingerprint spoofing backend readiness |
 
-Fingerprint spoofing works by re-issuing the request from the proxy via impit (native Rust TLS/HTTP2 impersonation via rustls). TLS 1.3 and HTTP/2 fingerprints (SETTINGS, WINDOW_UPDATE, PRIORITY frames) match real browsers by construction. The origin server sees the proxy's spoofed TLS, HTTP/2, and header order — not the original client's. When a `user_agent` is set (including via presets), proxy-mcp also normalizes Chromium UA Client Hints headers (`sec-ch-ua*`) to match the spoofed User-Agent (forwarding contradictory hints is a common bot signal). **Chrome browser exception:** when Chrome is launched via `interceptor_chrome_launch`, document loads and same-origin requests use Chrome's native TLS (no impit), preserving fingerprint consistency for bot detection challenges. Only cross-origin sub-resource requests are re-issued with spoofed TLS. Non-browser clients (curl, spawn, HAR replay) get full TLS + UA spoofing on all requests. Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup. `proxy_set_ja3_spoof` is kept for backward compatibility but custom JA3 strings are ignored (the preset's impit browser target is used instead). JA4 fingerprints are captured (read-only) but spoofing is not supported.
+Fingerprint spoofing works by re-issuing the request from the proxy via impit (native Rust TLS/HTTP2 impersonation via rustls). TLS 1.3 and HTTP/2 fingerprints (SETTINGS, WINDOW_UPDATE, PRIORITY frames) match real browsers by construction. The origin server sees the proxy's spoofed TLS, HTTP/2, and header order — not the original client's. When a `user_agent` is set (including via presets), proxy-mcp also normalizes Chromium UA Client Hints headers (`sec-ch-ua*`) to match the spoofed User-Agent (forwarding contradictory hints is a common bot signal). **Browser exception:** when cloakbrowser is launched via `interceptor_browser_launch`, document loads and same-origin requests use the browser's native TLS (no impit), preserving fingerprint consistency for bot detection challenges. Only cross-origin sub-resource requests are re-issued with spoofed TLS. Non-browser clients (curl, spawn, HAR replay) get full TLS + UA spoofing on all requests. Use `proxy_set_fingerprint_spoof` with a browser preset for one-command setup. `proxy_set_ja3_spoof` is kept for backward compatibility but custom JA3 strings are ignored (the preset's impit browser target is used instead). JA4 fingerprints are captured (read-only) but spoofing is not supported.
 
-### Interceptors (18)
+### Interceptors (17)
 
 Interceptors configure targets (browsers, processes, devices, containers) to route their traffic through the proxy automatically.
 
@@ -410,18 +385,15 @@ Interceptors configure targets (browsers, processes, devices, containers) to rou
 | `interceptor_status` | Detailed status of a specific interceptor |
 | `interceptor_deactivate_all` | Emergency cleanup: kill all active interceptors across all types |
 
-#### Chrome (4)
+#### Browser (3)
 
 | Tool | Description |
 |------|-------------|
-| `interceptor_chrome_launch` | Launch Chrome/Chromium/Brave/Edge with proxy flags and SPKI cert trust |
-| `interceptor_chrome_cdp_info` | Get CDP endpoints (HTTP + WebSocket) and tab targets for a launched Chrome |
-| `interceptor_chrome_navigate` | Navigate a tab via the launched Chrome target's CDP page WebSocket and verify proxy capture |
-| `interceptor_chrome_close` | Close a Chrome instance by target ID |
+| `interceptor_browser_launch` | Launch cloakbrowser (stealth Chromium) with proxy flags, SPKI cert trust, built-in humanize mode |
+| `interceptor_browser_navigate` | Navigate the bound page via Playwright `page.goto` and verify proxy capture |
+| `interceptor_browser_close` | Close a browser instance by target ID |
 
-Launches with isolated temp profile, auto-cleaned on close. Supports `chrome`, `chromium`, `brave`, `edge`.
-
-When fingerprint spoofing is active (`proxy_set_fingerprint_spoof`), Chrome launches in **stealth mode**: chrome-launcher's default flags that create detectable artifacts (e.g. `--disable-extensions` removing `chrome.runtime`) are replaced with a curated minimal set, and anti-detection patches are injected via CDP before any page scripts run. This covers `navigator.webdriver`, `chrome.runtime` presence, `Permissions.query`, and Error stack sanitization. Chrome keeps its **real User-Agent** (no UA override) so that bot detection JS (Kasada, Akamai) sees browser capabilities matching the actual Chrome version. Same-origin sub-resource requests also bypass impit to maintain TLS fingerprint consistency within each domain — only cross-origin requests are re-issued with spoofed TLS.
+Stealth is source-level: cloakbrowser ships 48+ C++ patches so ja3n/ja4/akamai match real Chrome, `navigator.webdriver` is false, audio/canvas/WebGL fingerprints match real hardware. No JS stealth injection needed. First launch downloads a ~200 MB Chromium binary (cached afterwards).
 
 #### Terminal / Process (2)
 
@@ -462,29 +434,23 @@ Sets 18+ env vars covering curl, Node.js, Python requests, Deno, Git, npm/yarn.
 
 Two modes: `exec` (live injection, existing processes need restart) and `restart` (stop + restart container). Uses `host.docker.internal` for proxy URL.
 
-### DevTools Bridge (14)
+### Browser DevTools-equivalents (9)
 
-Proxy-safe wrappers around a managed `chrome-devtools-mcp` sidecar, bound to a specific `interceptor_chrome_launch` target.
+Playwright-driven tools for the browser target. Each takes a `target_id` directly — no session binding, no sidecar.
 
 | Tool | Description |
 |------|-------------|
-| `interceptor_chrome_devtools_pull_sidecar` | Install/pull `chrome-devtools-mcp` so full DevTools bridge actions are available |
-| `interceptor_chrome_devtools_attach` | Start a bound DevTools sidecar session for one Chrome interceptor target |
-| `interceptor_chrome_devtools_navigate` | Navigate via bound DevTools session and verify matching proxy traffic |
-| `interceptor_chrome_devtools_snapshot` | Get accessibility snapshot from bound DevTools session |
-| `interceptor_chrome_devtools_list_network` | List network requests from bound DevTools session |
-| `interceptor_chrome_devtools_list_console` | List console messages from bound DevTools session |
-| `interceptor_chrome_devtools_screenshot` | Capture screenshot from bound DevTools session |
-| `interceptor_chrome_devtools_list_cookies` | Token-efficient cookie listing with filters, pagination, and truncated value previews |
-| `interceptor_chrome_devtools_get_cookie` | Get one cookie by `cookie_id` (value is capped to keep output bounded) |
-| `interceptor_chrome_devtools_list_storage_keys` | Token-efficient localStorage/sessionStorage key listing with pagination and value previews |
-| `interceptor_chrome_devtools_get_storage_value` | Get one storage value by `item_id` |
-| `interceptor_chrome_devtools_list_network_fields` | Token-efficient header field listing from proxy-captured traffic since session creation |
-| `interceptor_chrome_devtools_get_network_field` | Get one full header field value by `field_id` |
-| `interceptor_chrome_devtools_detach` | Close one bound DevTools sidecar session |
+| `interceptor_browser_snapshot` | ARIA/role YAML snapshot of the page (or selector subtree) — optimized for LLM page reasoning |
+| `interceptor_browser_screenshot` | Screenshot. Writes to `file_path` if provided; otherwise reports byte count only |
+| `interceptor_browser_list_console` | Buffered console messages since launch, with type/text filters and pagination |
+| `interceptor_browser_list_cookies` | Cookie listing with filters, pagination, truncated value previews |
+| `interceptor_browser_get_cookie` | Get one cookie by `cookie_id` (value is capped to keep output bounded) |
+| `interceptor_browser_list_storage_keys` | localStorage/sessionStorage key listing with value previews |
+| `interceptor_browser_get_storage_value` | Get one storage value by `item_id` |
+| `interceptor_browser_list_network_fields` | Header field listing from proxy-captured traffic since the browser was launched |
+| `interceptor_browser_get_network_field` | Get one full header field value by `field_id` |
 
-Note: image payloads from DevTools responses are redacted from MCP output to avoid pushing large base64 blobs into context.
-If `file_path` is provided for screenshot and sidecar returns the image inline, proxy-mcp writes it to disk in the wrapper.
+Network data is sourced from the MITM proxy rather than a browser-side protocol — the proxy sees every wire request regardless of what the browser reported.
 
 ### Sessions (13)
 
@@ -510,19 +476,19 @@ Persistent, queryable on-disk capture for long runs and post-crash analysis.
 
 Note on `proxy_start` with `persistence_enabled: true`: this auto-creates a session. A subsequent `proxy_session_start()` call returns the existing active session instead of failing — no need to stop and re-start.
 
-### Humanizer — CDP Input (5)
+### Humanizer — Playwright Input (5)
 
-Human-like browser input via Chrome DevTools Protocol. Dispatches `Input.*` events with realistic timing, Bezier mouse paths, and natural keystroke delays. Binds to `target_id` (Chrome interceptor target) — manages its own persistent CdpSession per target, independent of the DevTools Bridge sidecar.
+Human-like browser input via Playwright `page.mouse` / `page.keyboard`, layered on top of cloakbrowser's built-in humanize mode. Binds to `target_id` from `interceptor_browser_launch`.
 
 | Tool | Description |
 |------|-------------|
 | `humanizer_move` | Move mouse along a Bezier curve with Fitts's law velocity scaling and eased timing |
-| `humanizer_click` | Move to element (CSS selector) or coordinates, then click with human-like timing. Supports left/right/middle button and multi-click |
+| `humanizer_click` | Click a locator (`selector` / `role` + `name` / `text` / `label`) or raw `x,y`. Auto-waits for visible + enabled + stable + in-view before clicking |
 | `humanizer_type` | Type text with per-character delays modeled on WPM, bigram frequency, shift penalty, word pauses, and optional typo injection |
 | `humanizer_scroll` | Scroll with easeInOutQuad acceleration/deceleration via multiple wheel events |
 | `humanizer_idle` | Simulate idle behavior with mouse micro-jitter and occasional micro-scrolls to defeat idle detection |
 
-All tools require `target_id` from a prior `interceptor_chrome_launch`. The engine maintains tracked mouse position across calls, so `humanizer_move` followed by `humanizer_click` produces a continuous path.
+All tools require `target_id` from a prior `interceptor_browser_launch`. The engine maintains tracked mouse position across calls, so `humanizer_move` followed by `humanizer_click` produces a continuous path.
 
 **Behavioral details:**
 - **Mouse paths**: Cubic Bezier curves with random control points, Fitts's law distance/size scaling, optional overshoot + correction arc
@@ -538,11 +504,9 @@ All tools require `target_id` from a prior `interceptor_chrome_launch`. The engi
 | `proxy://ca-cert` | CA certificate PEM |
 | `proxy://traffic/summary` | Traffic stats: method/status breakdown, top hostnames, TLS fingerprint stats |
 | `proxy://interceptors` | All interceptor metadata and activation status |
-| `proxy://chrome/devtools/sessions` | Active DevTools sidecar sessions bound to Chrome target IDs |
 | `proxy://sessions` | Persistent session catalog + runtime persistence status |
-| `proxy://chrome/primary` | CDP endpoints for the most recently launched Chrome instance |
-| `proxy://chrome/targets` | CDP endpoints + tab targets for active Chrome instances |
-| `proxy://chrome/{target_id}/cdp` | CDP endpoints for a specific Chrome instance (resource template) |
+| `proxy://browser/primary` | Current page URL/title for the most recently launched browser instance |
+| `proxy://browser/targets` | Current page state for all active browser instances |
 | `proxy://sessions/{session_id}/summary` | Aggregate stats for one recorded session (resource template) |
 | `proxy://sessions/{session_id}/timeline` | Time-bucketed request/error timeline (resource template) |
 | `proxy://sessions/{session_id}/findings` | Top errors/slow exchanges/host error rates (resource template) |
@@ -560,7 +524,7 @@ proxy_session_start --capture_profile full --session_name "reverse-run-1"
 # Install CA cert on device (proxy_get_ca_cert)
 
 # Or use interceptors to auto-configure targets:
-interceptor_chrome_launch                    # Launch Chrome with proxy
+interceptor_browser_launch                    # Launch stealth browser with proxy
 interceptor_spawn --command curl --args '["https://example.com"]'  # Spawn proxied process
 interceptor_android_activate --serial DEVICE_SERIAL               # Android device
 
@@ -579,17 +543,17 @@ proxy_search_traffic --query "error"
 
 # TLS fingerprinting
 proxy_list_tls_fingerprints                # See unique JA3/JA4 fingerprints
-proxy_set_ja3_spoof --ja3 "771,4865-..."   # Spoof outgoing JA3
+proxy_set_ja3_spoof --ja3 "771,4865-..."   # Spoof outgoing JA3 (for non-browser clients)
 proxy_set_fingerprint_spoof --preset chrome_136 --host_patterns '["example.com"]'  # Full fingerprint spoof
-interceptor_chrome_launch --url "https://example.com"       # With spoof active → stealth mode auto-enabled
 proxy_list_fingerprint_presets                  # Available browser presets
 
-# Human-like browser interaction (requires interceptor_chrome_launch target)
-humanizer_move --target_id "chrome_<pid>" --x 500 --y 300
-humanizer_click --target_id "chrome_<pid>" --selector "#login-button"
-humanizer_type --target_id "chrome_<pid>" --text "user@example.com" --wpm 45
-humanizer_scroll --target_id "chrome_<pid>" --delta_y 300
-humanizer_idle --target_id "chrome_<pid>" --duration_ms 2000 --intensity subtle
+# Human-like browser interaction (requires interceptor_browser_launch target)
+humanizer_move   --target_id "browser_<id>" --x 500 --y 300
+humanizer_click  --target_id "browser_<id>" --selector "#login-button"
+humanizer_click  --target_id "browser_<id>" --role "button" --name "Sign in"
+humanizer_type   --target_id "browser_<id>" --text "user@example.com" --wpm 45
+humanizer_scroll --target_id "browser_<id>" --delta_y 300
+humanizer_idle   --target_id "browser_<id>" --duration_ms 2000 --intensity subtle
 
 # Query/export recorded session
 proxy_list_sessions
@@ -606,7 +570,8 @@ proxy_export_har --session_id SESSION_ID
 - **TLS capture**: Client JA3/JA4 from mockttp socket metadata; server JA3S via `tls.connect` monkey-patch
 - **TLS spoofing**: impit (native Rust TLS/HTTP2 impersonation via rustls); in-process, no container needed
 - **Interceptors**: Managed by `InterceptorManager`, each type registers independently
-- **Humanizer**: Singleton `HumanizerEngine` with persistent `CdpSession` per Chrome target, tracks mouse position across calls. Pure TypeScript — no external deps (Bezier paths, Fitts's law, bigram timing all computed internally)
+- **Browser**: cloakbrowser (stealth Chromium, ~200 MB binary auto-downloaded on first launch) driven via Playwright `BrowserContext` / `Page`
+- **Humanizer**: Singleton engine using Playwright's `page.mouse` / `page.keyboard`. Custom timing layer (Bezier paths, Fitts's law, bigram typing) feeds Playwright — sits on top of cloakbrowser's built-in `humanize: true`
 
 ## Testing
 
@@ -614,7 +579,7 @@ proxy_export_har --session_id SESSION_ID
 npm test              # All tests (unit + integration)
 npm run test:unit     # Unit tests only
 npm run test:integration  # Integration tests
-npm run test:e2e      # E2E fingerprint tests (requires Chrome + internet)
+npm run test:e2e      # E2E fingerprint tests (requires cloakbrowser + internet)
 ```
 
 ## Credits
@@ -626,7 +591,8 @@ npm run test:e2e      # E2E fingerprint tests (requires Chrome + internet)
 | [mockttp](https://github.com/httptoolkit/mockttp) | MITM proxy engine, rule system, CA generation |
 | [impit](https://github.com/yfe404/impit) | Native TLS/HTTP2 fingerprint impersonation (Rust via NAPI-RS) |
 | [frida-js](https://github.com/AeonLucid/frida-js) | Pure-JS Frida client for Android instrumentation |
-| [chrome-launcher](https://github.com/nicolo-ribaudo/chrome-launcher) | Chrome/Chromium process management |
+| [cloakbrowser](https://cloakbrowser.dev/) | Stealth-patched Chromium with source-level C++ fingerprint patches |
+| [playwright-core](https://playwright.dev/) | Browser automation API driving cloakbrowser |
 | [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) | MCP server framework |
 
 ### Vendored Frida Scripts
