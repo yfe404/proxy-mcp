@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.2.0
+
+### Breaking Changes
+
+- **Humanizer layer rewritten as thin wrapper over cloakbrowser-patched Playwright.** The custom Bezier/Fitts/WPM/bigram/typo code was duplicating (and fighting with) cloakbrowser's own `humanize: true` layer, and bypassed it by calling low-level `page.keyboard.press` — which dropped uppercase and symbol case. Engine now routes to `page.click`/`page.mouse.*`/`page.keyboard.type`, all patched by cloakbrowser with CDP-trusted Shift handling.
+- **Tool params changed:**
+  - `humanizer_click`: `move_duration_ms` removed; `timeout_ms` added (default 15000).
+  - `humanizer_type`: `wpm` and `error_rate` removed; `delay_ms` added (optional passthrough to `keyboard.type`).
+  - `humanizer_scroll`: `duration_ms` removed (single wheel event).
+  - `humanizer_move`: `duration_ms` removed.
+- `src/humanizer/path.ts` and `src/humanizer/timing.ts` deleted.
+
+### Fixes
+
+- **Uppercase and symbol typing now works.** The old `page.keyboard.press("Shift+a")` path produced lowercase output for some targets; cloakbrowser's patched `page.keyboard.type` uses CDP `Input.dispatchKeyEvent` with `isTrusted=true` and correct Shift framing.
+
 ## 2.1.0
 
 ### New Features

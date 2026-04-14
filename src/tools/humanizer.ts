@@ -1,9 +1,9 @@
 /**
- * Humanizer MCP tools — human-like browser input via Playwright.
+ * Humanizer MCP tools — thin wrappers over cloakbrowser-patched Playwright.
  *
- * Bound to a browser interceptor target_id (from interceptor_browser_launch).
- * humanizer_click supports locator-first targeting (selector | role+name |
- * text | label) so callers no longer need to guess pixel coordinates.
+ * cloakbrowser's `humanize: true` (on by default) already provides Bezier
+ * mouse paths, realistic typing with CDP-trusted Shift handling, and smooth
+ * scrolling. These tools just expose the patched methods to MCP callers.
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -21,18 +21,16 @@ export function registerHumanizerTools(server: McpServer): void {
 
   server.tool(
     "humanizer_move",
-    "Move mouse along a human-like Bezier curve to target coordinates. " +
-    "Uses Fitts's law velocity scaling and eased timing profile.",
+    "Move mouse to target coordinates. cloakbrowser's humanize patches " +
+    "page.mouse.move with a Bezier-curved path.",
     {
       target_id: z.string().describe("Browser target ID from interceptor_browser_launch"),
       x: z.number().describe("Destination X coordinate"),
       y: z.number().describe("Destination Y coordinate"),
-      duration_ms: z.number().optional().default(600)
-        .describe("Base duration in ms before Fitts scaling (default: 600)"),
     },
-    async ({ target_id, x, y, duration_ms }) => {
+    async ({ target_id, x, y }) => {
       try {
-        const result = await humanizerEngine.moveMouse(target_id, x, y, duration_ms);
+        const result = await humanizerEngine.moveMouse(target_id, x, y);
         return {
           content: [{
             type: "text",
@@ -55,9 +53,9 @@ export function registerHumanizerTools(server: McpServer): void {
 
   server.tool(
     "humanizer_click",
-    "Click an element using Playwright locators — no need to guess pixel coordinates. " +
-    "Auto-waits for visible + enabled + stable + in-view before clicking. Pass one of: " +
-    "selector (CSS/XPath), role + optional name, text, label, or raw x+y coords as fallback.",
+    "Click an element. Pass one of: selector (CSS/XPath), role + optional name, " +
+    "text, label, or raw x+y coords as fallback. cloakbrowser's humanize handles " +
+    "the Bezier path and click timing; locator-based calls auto-wait for visible.",
     {
       target_id: z.string().describe("Browser target ID from interceptor_browser_launch"),
       selector: z.string().optional().describe("CSS or XPath selector (e.g. 'button.submit', '//button[@id=\"go\"]')"),
@@ -71,10 +69,10 @@ export function registerHumanizerTools(server: McpServer): void {
         .describe("Mouse button (default: left)"),
       click_count: z.number().optional().default(1)
         .describe("Number of clicks (default: 1, use 2 for double-click)"),
-      move_duration_ms: z.number().optional().default(600)
-        .describe("Base duration for mouse movement (default: 600)"),
+      timeout_ms: z.number().optional().default(15000)
+        .describe("Max ms to wait for locator to be visible + actionable (default: 15000)"),
     },
-    async ({ target_id, selector, role, name, text, label, x, y, button, click_count, move_duration_ms }) => {
+    async ({ target_id, selector, role, name, text, label, x, y, button, click_count, timeout_ms }) => {
       try {
         const result = await humanizerEngine.click(target_id, {
           selector,
@@ -86,7 +84,7 @@ export function registerHumanizerTools(server: McpServer): void {
           y,
           button,
           clickCount: click_count,
-          moveDurationMs: move_duration_ms,
+          timeoutMs: timeout_ms,
         });
         return {
           content: [{
@@ -113,20 +111,18 @@ export function registerHumanizerTools(server: McpServer): void {
 
   server.tool(
     "humanizer_type",
-    "Type text with human-like keystroke timing. " +
-    "Models per-character delays based on WPM, bigram frequency, shift penalty, " +
-    "word boundary pauses, and optional typo injection with backspace correction.",
+    "Type text into the focused element. cloakbrowser's humanize patches " +
+    "page.keyboard.type with realistic per-char timing and CDP-trusted Shift " +
+    "handling (uppercase + symbols preserved).",
     {
       target_id: z.string().describe("Browser target ID from interceptor_browser_launch"),
       text: z.string().describe("Text to type"),
-      wpm: z.number().optional().default(40)
-        .describe("Typing speed in words per minute (default: 40)"),
-      error_rate: z.number().optional().default(0)
-        .describe("Typo probability per character, 0-1 (default: 0)"),
+      delay_ms: z.number().optional()
+        .describe("Extra delay per character in ms. Omit to let cloakbrowser pick its own humanized cadence."),
     },
-    async ({ target_id, text, wpm, error_rate }) => {
+    async ({ target_id, text, delay_ms }) => {
       try {
-        const result = await humanizerEngine.typeText(target_id, text, { wpm, errorRate: error_rate });
+        const result = await humanizerEngine.typeText(target_id, text, { delayMs: delay_ms });
         return {
           content: [{
             type: "text",
@@ -139,9 +135,6 @@ export function registerHumanizerTools(server: McpServer): void {
                 total_ms: result.totalMs,
                 events_dispatched: result.eventsDispatched,
                 chars_typed: result.charsTyped,
-                effective_wpm: text.length > 0
-                  ? Math.round((text.length / 5) / (result.totalMs / 60_000))
-                  : 0,
               },
             }),
           }],
@@ -156,19 +149,16 @@ export function registerHumanizerTools(server: McpServer): void {
 
   server.tool(
     "humanizer_scroll",
-    "Scroll with natural acceleration/deceleration using easeInOutQuad velocity distribution. " +
-    "Dispatches multiple wheel events to simulate human scroll behavior.",
+    "Dispatch a wheel event. Raw page.mouse.wheel — single event, not multi-step.",
     {
       target_id: z.string().describe("Browser target ID from interceptor_browser_launch"),
       delta_y: z.number().describe("Vertical scroll delta in pixels (positive = scroll down)"),
       delta_x: z.number().optional().default(0)
         .describe("Horizontal scroll delta in pixels (default: 0)"),
-      duration_ms: z.number().optional().default(400)
-        .describe("Total scroll duration in ms (default: 400)"),
     },
-    async ({ target_id, delta_y, delta_x, duration_ms }) => {
+    async ({ target_id, delta_y, delta_x }) => {
       try {
-        const result = await humanizerEngine.scroll(target_id, delta_y, delta_x, duration_ms);
+        const result = await humanizerEngine.scroll(target_id, delta_y, delta_x);
         return {
           content: [{
             type: "text",
