@@ -1,22 +1,16 @@
 /**
- * Playwright-backed humanizer engine.
+ * Humanizer engine — thin wrappers over cloakbrowser-patched Playwright.
  *
- * Replaces the former CDP-based engine. Uses the cloakbrowser-launched
- * Playwright Page for each target. cloakbrowser's `humanize: true` already
- * patches input dispatch at the C++ layer; this engine layers custom per-call
- * timing profiles (WPM + bigram + typo, Bezier paths, eased scroll) on top.
- *
- * humanizer_click supports locator-first targeting (selector | role+name |
- * text | label) so callers no longer need to guess pixel coordinates — the
- * locator auto-waits for visible+enabled+stable+in-view before dispatching.
+ * cloakbrowser's `humanize: true` already patches page.click / page.mouse.move /
+ * page.mouse.click / page.keyboard.type / page.hover / page.type with Bezier
+ * paths, realistic typing, and CDP-trusted Shift handling. This engine just
+ * routes tool calls to those patched methods — no duplicate timing code.
  */
 
 import type { Page, Locator } from "playwright-core";
 import { getPageForTarget } from "../browser/session.js";
-import { generatePath, addRandomOffset, type Point } from "./path.js";
-import { calculateKeyDelays, calculateScrollSteps, type TypingProfile } from "./timing.js";
 
-// ── Helpers ──────────────────────────────────────────────────────────
+interface Point { x: number; y: number }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -26,17 +20,9 @@ function rand(min: number, max: number): number {
   return min + Math.random() * (max - min);
 }
 
-function isUpperCase(ch: string): boolean {
-  return ch !== ch.toLowerCase() && ch === ch.toUpperCase();
-}
+// ── Mouse position tracking (for coord-based idle jitter) ────────────
 
-// ── Mouse position tracking ──────────────────────────────────────────
-
-interface MouseState {
-  x: number;
-  y: number;
-}
-
+interface MouseState { x: number; y: number }
 const mouseStates = new Map<string, MouseState>();
 
 function getMouseState(targetId: string): MouseState {
@@ -67,7 +53,6 @@ export interface ClickTarget {
 function resolveLocator(page: Page, opts: ClickTarget): Locator | null {
   if (opts.selector) return page.locator(opts.selector);
   if (opts.role) {
-    // Playwright requires role to be a known AriaRole; we accept any string.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return page.getByRole(opts.role as any, opts.name ? { name: opts.name } : undefined);
   }
@@ -76,196 +61,104 @@ function resolveLocator(page: Page, opts: ClickTarget): Locator | null {
   return null;
 }
 
-async function resolveCenter(locator: Locator): Promise<{ center: Point; box: { width: number; height: number } }> {
-  await locator.waitFor({ state: "visible", timeout: 15_000 });
-  await locator.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => { /* non-fatal */ });
-  const box = await locator.boundingBox({ timeout: 5_000 });
-  if (!box) {
-    throw new Error("Locator has no bounding box (element not rendered or zero-size).");
-  }
-  return {
-    center: { x: box.x + box.width / 2, y: box.y + box.height / 2 },
-    box: { width: box.width, height: box.height },
-  };
+function resolvedByLabel(opts: ClickTarget): string {
+  if (opts.selector) return "selector";
+  if (opts.role) return "role";
+  if (opts.text) return "text";
+  if (opts.label) return "label";
+  return "coords";
 }
 
 // ── Engine ───────────────────────────────────────────────────────────
 
 class HumanizerEngine {
-  /** Drop tracked mouse state when a target is closed. */
   closeSession(targetId: string): void {
     clearMouseState(targetId);
   }
-
-  // ── Mouse movement ─────────────────────────────────────────────
 
   async moveMouse(
     targetId: string,
     x: number,
     y: number,
-    durationMs?: number,
   ): Promise<{ totalMs: number; eventsDispatched: number }> {
     const page = getPageForTarget(targetId);
+    const start = Date.now();
+    await page.mouse.move(x, y);
     const state = getMouseState(targetId);
-    const from: Point = { x: state.x, y: state.y };
-    const to: Point = { x, y };
-
-    const path = generatePath(from, to, { baseDurationMs: durationMs ?? 600 });
-
-    let eventsDispatched = 0;
-    for (let i = 0; i < path.points.length; i++) {
-      const pt = path.points[i];
-      if (i > 0) {
-        const delay = path.timestamps[i] - path.timestamps[i - 1];
-        if (delay > 0) await sleep(delay);
-      }
-      await page.mouse.move(pt.x, pt.y);
-      eventsDispatched++;
-    }
-
-    const last = path.points[path.points.length - 1];
-    state.x = last.x;
-    state.y = last.y;
-
-    return { totalMs: path.totalMs, eventsDispatched };
+    state.x = x;
+    state.y = y;
+    return { totalMs: Date.now() - start, eventsDispatched: 1 };
   }
-
-  // ── Click ──────────────────────────────────────────────────────
 
   async click(
     targetId: string,
     opts: ClickTarget & {
       button?: "left" | "right" | "middle";
       clickCount?: number;
-      moveDurationMs?: number;
+      timeoutMs?: number;
     } = {},
   ): Promise<{ totalMs: number; eventsDispatched: number; clickedAt: Point; resolvedBy: string }> {
     const page = getPageForTarget(targetId);
     const button = opts.button ?? "left";
     const clickCount = opts.clickCount ?? 1;
-
-    let targetX: number;
-    let targetY: number;
-    let resolvedBy: string;
+    const timeout = opts.timeoutMs ?? 15_000;
+    const start = Date.now();
+    const resolvedBy = resolvedByLabel(opts);
 
     const locator = resolveLocator(page, opts);
     if (locator) {
-      const { center, box } = await resolveCenter(locator);
-      const offset = addRandomOffset(center, box);
-      targetX = offset.x;
-      targetY = offset.y;
-      resolvedBy = opts.selector ? "selector"
-        : opts.role ? "role"
-        : opts.text ? "text"
-        : "label";
-    } else if (opts.x !== undefined && opts.y !== undefined) {
-      targetX = opts.x;
-      targetY = opts.y;
-      resolvedBy = "coords";
-    } else {
-      throw new Error("Provide one of: selector, role (+ name), text, label, or x+y coordinates.");
+      await locator.click({ button, clickCount, timeout });
+      const box = await locator.boundingBox({ timeout: 5_000 }).catch(() => null);
+      const center: Point = box
+        ? { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+        : { x: 0, y: 0 };
+      const state = getMouseState(targetId);
+      state.x = center.x;
+      state.y = center.y;
+      return { totalMs: Date.now() - start, eventsDispatched: 1, clickedAt: center, resolvedBy };
     }
 
-    const moveResult = await this.moveMouse(targetId, targetX, targetY, opts.moveDurationMs);
-    let eventsDispatched = moveResult.eventsDispatched;
-    let totalMs = moveResult.totalMs;
-
-    const preClickDelay = Math.round(rand(30, 80));
-    await sleep(preClickDelay);
-    totalMs += preClickDelay;
-
-    for (let c = 0; c < clickCount; c++) {
-      await page.mouse.down({ button });
-      eventsDispatched++;
-
-      const holdMs = Math.round(rand(40, 100));
-      await sleep(holdMs);
-      totalMs += holdMs;
-
-      await page.mouse.up({ button });
-      eventsDispatched++;
-
-      if (c < clickCount - 1) {
-        const interClickMs = Math.round(rand(50, 120));
-        await sleep(interClickMs);
-        totalMs += interClickMs;
-      }
+    if (opts.x !== undefined && opts.y !== undefined) {
+      await page.mouse.click(opts.x, opts.y, { button, clickCount });
+      const state = getMouseState(targetId);
+      state.x = opts.x;
+      state.y = opts.y;
+      return {
+        totalMs: Date.now() - start,
+        eventsDispatched: 1,
+        clickedAt: { x: opts.x, y: opts.y },
+        resolvedBy,
+      };
     }
 
-    return { totalMs, eventsDispatched, clickedAt: { x: targetX, y: targetY }, resolvedBy };
+    throw new Error("Provide one of: selector, role (+ name), text, label, or x+y coordinates.");
   }
-
-  // ── Typing ─────────────────────────────────────────────────────
 
   async typeText(
     targetId: string,
     text: string,
-    profile: TypingProfile = {},
+    opts: { delayMs?: number } = {},
   ): Promise<{ totalMs: number; eventsDispatched: number; charsTyped: number }> {
     const page = getPageForTarget(targetId);
-    const keyDelays = calculateKeyDelays(text, profile);
-
-    let totalMs = 0;
-    let eventsDispatched = 0;
-
-    for (const { key, delayMs } of keyDelays) {
-      await sleep(delayMs);
-      totalMs += delayMs;
-
-      if (key === "Backspace") {
-        await page.keyboard.press("Backspace");
-        eventsDispatched++;
-      } else if (key === " ") {
-        await page.keyboard.press("Space");
-        eventsDispatched++;
-      } else if (key.length === 1) {
-        // Shift is handled automatically by Playwright's keyboard.type for single chars.
-        if (isUpperCase(key)) {
-          await page.keyboard.press(`Shift+${key.toLowerCase()}`);
-        } else {
-          await page.keyboard.press(key);
-        }
-        eventsDispatched++;
-      } else {
-        // Named key (Tab, Enter, etc.)
-        await page.keyboard.press(key);
-        eventsDispatched++;
-      }
-
-      const holdMs = Math.round(rand(20, 60));
-      await sleep(holdMs);
-      totalMs += holdMs;
-    }
-
-    return { totalMs, eventsDispatched, charsTyped: text.length };
+    const start = Date.now();
+    await page.keyboard.type(text, opts.delayMs !== undefined ? { delay: opts.delayMs } : undefined);
+    return {
+      totalMs: Date.now() - start,
+      eventsDispatched: text.length,
+      charsTyped: text.length,
+    };
   }
-
-  // ── Scroll ─────────────────────────────────────────────────────
 
   async scroll(
     targetId: string,
     deltaY: number,
     deltaX?: number,
-    durationMs?: number,
   ): Promise<{ totalMs: number; eventsDispatched: number }> {
     const page = getPageForTarget(targetId);
-    const steps = calculateScrollSteps({ deltaY, deltaX, durationMs: durationMs ?? 400 });
-
-    let totalMs = 0;
-    let eventsDispatched = 0;
-
-    for (const step of steps) {
-      await sleep(step.delayMs);
-      totalMs += step.delayMs;
-
-      await page.mouse.wheel(step.deltaX, step.deltaY);
-      eventsDispatched++;
-    }
-
-    return { totalMs, eventsDispatched };
+    const start = Date.now();
+    await page.mouse.wheel(deltaX ?? 0, deltaY);
+    return { totalMs: Date.now() - start, eventsDispatched: 1 };
   }
-
-  // ── Idle simulation ────────────────────────────────────────────
 
   async idle(
     targetId: string,
@@ -281,15 +174,13 @@ class HumanizerEngine {
     const scrollChance = intensity === "subtle" ? 0.05 : 0.15;
     const actionInterval = intensity === "subtle" ? rand(400, 1200) : rand(200, 600);
 
-    let elapsed = 0;
-    while (elapsed < durationMs) {
+    while (Date.now() - start < durationMs) {
       const waitMs = Math.min(
         Math.round(rand(actionInterval * 0.7, actionInterval * 1.3)),
-        durationMs - elapsed,
+        durationMs - (Date.now() - start),
       );
-      await sleep(waitMs);
-      elapsed = Date.now() - start;
-      if (elapsed >= durationMs) break;
+      if (waitMs > 0) await sleep(waitMs);
+      if (Date.now() - start >= durationMs) break;
 
       if (Math.random() < scrollChance) {
         const microDelta = Math.round(rand(-20, 20));
