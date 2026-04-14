@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.0
+
+### New Features
+
+- **`interceptor_browser_list_cookies` `full` option**: Pass `full: true` to return full cookie values inline (capped at 20000 chars) under a `value` field, instead of the default truncated `value_preview`. Overrides `value_max_chars`. Avoids round-tripping through `interceptor_browser_get_cookie` per entry when full bodies are needed.
+
 ## 2.0.0
 
 ### Breaking Changes
