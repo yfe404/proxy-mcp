@@ -247,9 +247,11 @@ export function registerDevToolsTools(server: McpServer): void {
       limit: z.number().optional().default(DEFAULT_LIST_LIMIT).describe("Max cookies to return (default: 50, max: 500)"),
       value_max_chars: z.number().optional().default(DEFAULT_VALUE_MAX_CHARS)
         .describe("Max characters for cookie value previews (default: 256)"),
+      full: z.boolean().optional().default(false)
+        .describe(`Return full cookie values instead of previews (capped at ${HARD_VALUE_CAP_CHARS} chars). Overrides value_max_chars.`),
       sort: z.enum(["name", "domain", "expires"]).optional().default("name").describe("Sort order (default: name)"),
     },
-    async ({ target_id, url_filter, domain_filter, name_filter, offset, limit, value_max_chars, sort }) => {
+    async ({ target_id, url_filter, domain_filter, name_filter, offset, limit, value_max_chars, full, sort }) => {
       try {
         const entry = getEntry(target_id);
         const cookies = await entry.context.cookies();
@@ -279,11 +281,13 @@ export function registerDevToolsTools(server: McpServer): void {
         const l = normalizeLimit(limit);
         const page = sorted.slice(o, o + l);
 
-        const valueCap = Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? DEFAULT_VALUE_MAX_CHARS)));
+        const valueCap = full
+          ? HARD_VALUE_CAP_CHARS
+          : Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? DEFAULT_VALUE_MAX_CHARS)));
 
         const summaries = page.map((c) => {
           const capped = capValue(c.value, valueCap);
-          return {
+          const base = {
             cookie_id: cookieStableId(c),
             name: c.name,
             domain: c.domain,
@@ -292,10 +296,12 @@ export function registerDevToolsTools(server: McpServer): void {
             httpOnly: c.httpOnly,
             secure: c.secure,
             sameSite: c.sameSite ?? null,
-            value_preview: capped.value,
             value_length: capped.valueLength,
             value_truncated: capped.truncated,
           };
+          return full
+            ? { ...base, value: capped.value }
+            : { ...base, value_preview: capped.value };
         });
 
         return {
