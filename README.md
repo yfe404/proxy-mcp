@@ -11,6 +11,7 @@ proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It 
 - [Boundaries](#boundaries)
 - [TLS ClientHello Passthrough](#tls-clienthello-passthrough-chrome-via-interceptor)
 - [Pairs well with CDP/Playwright](#pairs-well-with-cdpplaywright)
+- [Mobile Capture (Transparent Proxy)](#mobile-capture-transparent-proxy)
 - [Tools Reference](#tools-reference)
   - [Lifecycle](#lifecycle-4)
   - [Upstream Proxy](#upstream-proxy-4)
@@ -241,6 +242,185 @@ proxy_replay_session --session_id SESSION_ID --mode execute --target_base_url "h
 
 Note: imported HAR entries (and entries created by `proxy_replay_session`) do not carry JA3/JA4/JA3S handshake metadata. Use live proxy-captured traffic to analyze handshake fingerprints.
 
+## Mobile Capture (Transparent Proxy)
+
+For mobile apps with custom HTTP stacks that ignore the system proxy (most modern Android apps — Shopee, SHEIN, TikTok, banking, etc.) the explicit proxy won't see their traffic. proxy-mcp ships a **transparent listener** that sits behind an iptables REDIRECT and MITMs using the TLS SNI — no CONNECT tunnel required.
+
+Pairs with [proxy-ap-card](https://github.com/yfe404/proxy-ap-card) — a XIAO ESP32-S3 that broadcasts a WiFi AP (`proxy-ap` SSID by default) and presents to the laptop as a USB-NCM ethernet adapter. That repo handles the AP + NAPT side; proxy-mcp handles the laptop side.
+
+### Prerequisites
+
+- **Laptop**: Linux with `iptables`, `sysctl`, `nmcli` (NetworkManager), `ip` (iproute2), `adb`. `sudo` for network configuration (one command per session).
+- **Hardware router**: a [proxy-ap-card](https://github.com/yfe404/proxy-ap-card) (XIAO ESP32-S3) with firmware flashed. Or any USB-ethernet / USB-WiFi combo where the laptop NATs traffic for the phone's subnet — pass `--ap_iface` / `--ap_subnet` to override defaults.
+- **Target device**: Android with **root** (Magisk / KernelSU). Root is required to inject the CA into the system cert store. Android 14-16 additionally need the zygote mount-namespace injection which this tool does automatically.
+- **ADB access**: the target device must appear in `adb devices` (USB at minimum, wireless after pairing).
+
+### First-time walkthrough
+
+#### 1. Flash + plug in the proxy-ap-card
+
+Follow the [proxy-ap-card README](https://github.com/yfe404/proxy-ap-card) to build + flash the XIAO. On replug the laptop should show a `cdc_ncm` interface (verify: `ls /sys/class/net/*/device/uevent | xargs grep DRIVER | grep cdc_ncm`).
+
+#### 2. Connect the target device to the laptop via USB
+
+Only needed the first time per device, to push the CA. Verify with `adb devices`. Copy the serial.
+
+#### 3. Run the setup tool
+
+```
+proxy_mobile_setup --android_serial <serial>
+```
+
+Optional arguments:
+
+| Param | Default | When to override |
+|-------|---------|------------------|
+| `ap_iface` | auto-detect (`cdc_ncm`) | Using a different USB-ethernet bridge |
+| `ap_address` | `192.168.99.2/24` | Matches default proxy-ap-card firmware |
+| `ap_subnet` | `192.168.4.0/24` | Matches default proxy-ap-card firmware |
+| `egress_iface` | auto-detect from default route | Multi-homed host, or wanting traffic to exit via a specific iface |
+| `explicit_port` | `8080` | Port collision |
+| `transparent_port` | `8443` | Port collision |
+| `block_quic` | `true` | Need QUIC/HTTP3 (no MITM available then) |
+| `upstream_proxy_url` | — | Route outbound through a residential/ISP proxy — see below |
+| `android_serial` | — | Omit to skip CA injection (remote-only setups) |
+| `inject_cert` | `true` if `android_serial` set | Set `false` to re-use a prior install |
+
+The response is JSON with three key bits:
+
+```json
+{
+  "ap_iface": "enp195s0f3u1u4",
+  "cert_injected": true,
+  "android_target_id": "adb_HQ63C81CB2",
+  "sudo_command": "sudo bash /tmp/proxy-mcp-mobile-setup-<hex>.sh"
+}
+```
+
+Keep `android_target_id` around — you'll need it for teardown.
+
+#### 4. Run the emitted sudo script
+
+```
+sudo bash /tmp/proxy-mcp-mobile-setup-<hex>.sh
+```
+
+This is the only sudo required. The script is idempotent, safe to re-run. It plumbs the routing that `iptables` needs root for:
+
+```bash
+# Static IP on the AP iface (skipped if already configured).
+ip addr add 192.168.99.2/24 dev <ap_iface>
+
+# Forwarding + dedicated nat chain.
+sysctl -w net.ipv4.ip_forward=1
+iptables -t nat -N PROXY_MCP_PREROUTING
+iptables -t nat -A PROXY_MCP_PREROUTING -p tcp --dport 80  -j REDIRECT --to-ports 8080
+iptables -t nat -A PROXY_MCP_PREROUTING -p tcp --dport 443 -j REDIRECT --to-ports 8443
+iptables -t nat -A PREROUTING -i <ap_iface> -j PROXY_MCP_PREROUTING
+
+# Block QUIC so apps fall back to TCP/TLS.
+iptables -A FORWARD -i <ap_iface> -p udp --dport 443 -j DROP
+
+# Masquerade out through the real egress.
+iptables -t nat -A POSTROUTING -s 192.168.4.0/24 -o <egress_iface> -j MASQUERADE
+```
+
+Why a script and not direct execution? MCP runs as your user; iptables needs root; `sudo` from an MCP tool would require NOPASSWD or polkit policy (fragile, distro-specific). Emitting a script is auditable, reproducible, and portable.
+
+#### 5. Connect the phone to the `proxy-ap` WiFi
+
+Credentials are set in the proxy-ap-card firmware (default SSID `proxy-ap`, default password shown in that repo). After connecting, the phone can be unplugged from USB — future sessions don't need it.
+
+#### 6. Start capturing
+
+Every HTTP/HTTPS request from the phone now lands in proxy-mcp's ring buffer:
+
+```
+proxy_list_traffic --source_filter transparent   # iptables-redirected HTTPS
+proxy_list_traffic --source_filter explicit      # absolute-URL HTTP that arrived on :80
+proxy_get_exchange --exchange_id <id>            # full headers + body preview
+proxy_search_traffic --query "api.example.com"   # full-text search
+```
+
+Each entry carries `source: "explicit" | "transparent"` + TLS fingerprints (`ja3`, `ja4`).
+
+### Subsequent sessions (phone already paired)
+
+Skip step 2. Run:
+
+```
+proxy_mobile_setup                                # skip android_serial — cert already installed
+sudo bash /tmp/proxy-mcp-mobile-setup-<hex>.sh
+```
+
+Then phone joins the AP and capture resumes.
+
+### Upstream chaining
+
+Set `upstream_proxy_url` to route outbound traffic through a residential/ISP proxy — the target servers see that proxy's IP, not your laptop's:
+
+```
+proxy_mobile_setup \
+  --upstream_proxy_url "http://user:pass@proxy.example.com:8000" \
+  --android_serial <serial>
+```
+
+Applies to BOTH listeners. Use `proxy_set_upstream` after the fact to change it without restarting.
+
+### Verifying each step
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Listeners up | `proxy_status` | `running: true`, `transparentProxy.running: true` |
+| Iface detected | `proxy_mobile_detect_iface` | `found: true`, iface name |
+| Cert injected | `adb shell "su -c 'nsenter --mount=/proc/\$(pidof zygote64)/ns/mnt -- ls /apex/com.android.conscrypt/cacerts/ \| wc -l'"` | 144 (or 143 + 1) |
+| iptables wired | `sudo iptables -t nat -L PROXY_MCP_PREROUTING -v -n` | 2 REDIRECT rules, non-zero `pkts` after phone generates traffic |
+| Forwarding on | `cat /proc/sys/net/ipv4/ip_forward` | `1` |
+| Phone sees AP | phone Settings → WiFi shows `proxy-ap` connected, IP in `192.168.4.0/24` |
+| Traffic flowing | `proxy_list_traffic --limit 5` after opening any app | `source: "transparent"` entries with status 200 |
+
+### Teardown
+
+```
+proxy_mobile_teardown --android_target_id <from-setup>
+sudo bash /tmp/proxy-mcp-mobile-teardown-<hex>.sh
+```
+
+The MCP call stops both listeners and deactivates the Android target. The sudo script removes the iptables rules, disables `ip_forward`, and hands the AP iface back to NetworkManager. Phone stays connected to the AP until you forget it in phone WiFi settings.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| `proxy_mobile_detect_iface` returns `found: false` | proxy-ap-card not plugged in, or `cdc_ncm` driver missing | `lsusb \| grep '303a:'`; `dmesg \| grep cdc_ncm`; re-plug the card |
+| `setup` errors `No such file or directory: /sys/class/net/.../device/uevent` | iface name passed explicitly but doesn't exist | Use auto-detect or verify with `ip link` |
+| Phone connects to AP but zero traffic in `proxy_list_traffic` | sudo script not run; or phone on a different WiFi | Verify `cat /proc/sys/net/ipv4/ip_forward` returns `1`; check phone's active SSID |
+| Phone says "no internet" on `proxy-ap` | Forward + MASQUERADE rules missing, OR egress iface down | Re-run the sudo script; check `ip route show default` |
+| HTTPS fails with "connection not private" or similar | Cert not trusted by the app (Chrome bundles its own CAs and ignores system trust, app has cert pinning) | Use another app to verify chain works; Chrome is the exception not the rule (see limitations below) |
+| Some apps capture, others don't | Cert pinning in the apps that fail | See limitations below; Frida/LSPosed unpinning module needed |
+| Ports 20346/20443/other custom ports not captured | Only `:80` and `:443` are redirected | Add extra REDIRECT rules in the sudo script, or pair redsocks to `CONNECT`-tunnel arbitrary ports through the explicit listener |
+| `cert_injected: false` or zygote `nsenter` failed | Device not rooted, or SELinux `chcon` rejected | `adb shell su -c 'id'` must return `uid=0`; confirm `zygisksu` / Magisk is active |
+| Wireless ADB port changes every session | Android's Wireless Debugging randomises the port | Re-pair; or keep phone plugged in for control plane |
+
+### Without the proxy-ap-card
+
+Any USB-NCM or USB-ethernet bridge that the phone can route through works:
+
+```
+proxy_mobile_setup --ap_iface eth1 --ap_address 10.0.0.1/24 --ap_subnet 10.0.0.0/24
+```
+
+Or use a laptop-hosted WiFi AP via `hostapd` on a USB WiFi adapter (MT76x2U, RTL8812AU, etc.) — pass the `wlanN` interface as `ap_iface`.
+
+### Limitations
+
+- **Cert pinning** — apps that pin specific public keys (Instagram, WhatsApp, banking, Shopee homepage feed, etc.) will refuse our mockttp cert even with CA trust installed. You see partial capture (tracking / static / unpinned endpoints succeed, pinned API calls fail). Fix: Frida or LSPosed unpinning module for that specific app. See `interceptor_frida_attach` in the tool reference, or [morrownr's USB-WiFi guides](https://github.com/morrownr/USB-WiFi) for common patterns.
+- **Chrome on Android** — Chrome ships its own Mozilla CA bundle and enforces Certificate Transparency. Our CA is self-signed and not in any CT log, so Chrome rejects it regardless of system trust. Use any other app (or any OkHttp/Conscrypt-based browser) to verify the pipeline.
+- **QUIC / HTTP3** — the transparent listener is TCP/TLS only. By default we drop UDP/443 so apps fall back to TCP. Set `block_quic: false` if you *want* QUIC to pass through uncaptured (QUIC content won't appear in traffic logs).
+- **Non-standard ports** — the default iptables rules only redirect TCP/80 and TCP/443. Shopee's `:20346`, custom gaming protocols, etc. will bypass. Add more REDIRECT rules in the sudo script (or chain `redsocks` to issue CONNECT tunnels through the explicit listener).
+- **Native TLS pinning** — some apps use BoringSSL/OpenSSL directly via JNI with pins embedded in the `.so`. Java-layer Frida hooks won't catch these; native hooks needed.
+- **Root required** — the system-trust CA overlay requires root. Non-rooted Android only trusts user-installed CAs for apps that explicitly opt in via `network_security_config` — which no shipping app does. There's no bypass for that without root.
+
 ## Boundaries
 
 - Only sees traffic **configured to route through it** (not a network tap or packet sniffer)
@@ -308,6 +488,17 @@ Browser automation uses [cloakbrowser](https://cloakbrowser.dev/) — a stealth-
 | `proxy_stop` | Stop proxy (traffic/cert retained) |
 | `proxy_status` | Running state, port, rule/traffic counts |
 | `proxy_get_ca_cert` | CA certificate PEM + SPKI fingerprint |
+
+### Transparent / Mobile Capture (6)
+
+| Tool | Description |
+|------|-------------|
+| `proxy_start_transparent` | Start second MITM listener (SNI-based, no CONNECT) on a parallel port; shares CA + rules + ring buffer with the explicit listener |
+| `proxy_stop_transparent` | Stop the transparent listener |
+| `proxy_transparent_status` | Running state + port + dedicated traffic count |
+| `proxy_mobile_setup` | One-command mobile capture: start both listeners, inject CA into Android system store via adb (tmpfs overlay + zygote ns for Android 14+), emit a sudo-runnable iptables/sysctl/nmcli script |
+| `proxy_mobile_teardown` | Reverse setup: deactivate Android target, stop transparent listener, emit teardown script |
+| `proxy_mobile_detect_iface` | Probe `/sys/class/net` for a `cdc_ncm` USB interface (matches the [proxy-ap-card](https://github.com/yfe404/proxy-ap-card) firmware) |
 
 ### Upstream Proxy (4)
 

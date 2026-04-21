@@ -255,9 +255,12 @@ export interface ProxyStartOptions extends SessionStartOptions {
   persistenceEnabled?: boolean;
 }
 
+export type TrafficSource = "explicit" | "transparent";
+
 export interface CapturedExchange {
   id: string;
   timestamp: number;
+  source?: TrafficSource;
   request: {
     method: string;
     url: string;
@@ -362,6 +365,12 @@ export class ProxyManager {
   private pendingRequests = new Map<string, CapturedExchange>();
   private pendingRawBodies = new Map<string, { requestBody?: Buffer }>();
 
+  // Transparent proxy
+  private transparentServer: mockttp.Mockttp | null = null;
+  private transparentPort: number | null = null;
+  private _transparentRunning = false;
+  private transparentTrafficCount = 0;
+
   // TLS fingerprinting
   private tlsMetadataCache = new Map<string, TlsClientMetadata>();
   private serverTlsCapture: ServerTlsCapture | null = null;
@@ -407,6 +416,10 @@ export class ProxyManager {
     if (!this._running) {
       throw new Error("Proxy is not running.");
     }
+    // Stop transparent proxy first if running
+    if (this._transparentRunning) {
+      await this.stopTransparent().catch(() => {});
+    }
     // Deactivate all interceptors before stopping the proxy
     await interceptorManager.deactivateAll().catch(() => {});
     await cleanupTempCerts().catch(() => {});
@@ -423,6 +436,52 @@ export class ProxyManager {
     if (this._ja3SpoofConfig) {
       await shutdownSpoofContainer();
     }
+  }
+
+  // ── Transparent Proxy ──
+
+  async startTransparent(port: number = 8443): Promise<{ port: number }> {
+    if (this._transparentRunning) {
+      throw new Error("Transparent proxy is already running. Stop it first.");
+    }
+    if (!this.cert) {
+      throw new Error("No certificate. Start the explicit proxy first to generate the CA.");
+    }
+
+    this.transparentPort = port;
+    await this.buildAndStartTransparent();
+    this._transparentRunning = true;
+    this.transparentPort = this.transparentServer!.port;
+    this.transparentTrafficCount = 0;
+
+    return { port: this.transparentServer!.port };
+  }
+
+  async stopTransparent(): Promise<void> {
+    if (!this._transparentRunning) {
+      throw new Error("Transparent proxy is not running.");
+    }
+    if (this.transparentServer) {
+      await this.transparentServer.stop();
+      this.transparentServer = null;
+    }
+    this._transparentRunning = false;
+  }
+
+  isTransparentRunning(): boolean {
+    return this._transparentRunning;
+  }
+
+  getTransparentPort(): number | null {
+    return this.transparentPort;
+  }
+
+  getTransparentStatus(): object {
+    return {
+      running: this._transparentRunning,
+      port: this.transparentPort,
+      trafficCount: this.transparentTrafficCount,
+    };
   }
 
   isRunning(): boolean {
@@ -447,6 +506,7 @@ export class ProxyManager {
       hostUpstreams: Object.fromEntries(this.hostUpstreams),
       ruleCount: this.rules.size,
       trafficCount: this.traffic.length,
+      transparentProxy: this.getTransparentStatus(),
       persistence: this.sessionStore.getRuntimeStatus(),
     };
   }
@@ -1190,6 +1250,7 @@ export class ProxyManager {
 
   /**
    * Stop current server, rebuild with updated rules, restart on same port.
+   * Also rebuilds the transparent server if running, to keep rules in sync.
    */
   private async rebuildMockttpRules(): Promise<void> {
     const currentPort = this.port;
@@ -1200,6 +1261,60 @@ export class ProxyManager {
     this.port = currentPort;
     await this.buildAndStart();
     this.port = this.server!.port;
+
+    // Rebuild transparent server too so rules stay in sync
+    if (this._transparentRunning) {
+      const currentTransparentPort = this.transparentPort;
+      if (this.transparentServer) {
+        await this.transparentServer.stop();
+        this.transparentServer = null;
+      }
+      this.transparentPort = currentTransparentPort;
+      await this.buildAndStartTransparent();
+      this.transparentPort = this.transparentServer!.port;
+    }
+  }
+
+  /**
+   * Create a fresh mockttp server for transparent proxying.
+   * Uses the same CA cert, rules, and event listeners as the explicit proxy,
+   * but receives traffic redirected by iptables (not CONNECT tunnels).
+   */
+  private async buildAndStartTransparent(): Promise<void> {
+    if (!this.cert) throw new Error("No certificate");
+
+    const mockttp = await getMockttp();
+    const server = mockttp.getLocal({
+      https: { key: this.cert.key, cert: this.cert.cert },
+    });
+
+    // Wire event listeners to the SAME ring buffer, tagged as "transparent"
+    this.setupEventListeners(server, "transparent");
+
+    // Apply the same rules as the explicit proxy
+    const proxyConfig = this.resolveProxyConfig();
+    const enabledRules = [...this.rules.values()]
+      .filter((r) => r.enabled)
+      .sort((a, b) => a.priority - b.priority);
+
+    for (const rule of enabledRules) {
+      const builder = this.buildMatcher(server, rule.matcher).always();
+      await this.buildHandler(builder, rule, proxyConfig);
+    }
+
+    // Default passthrough — same logic as explicit proxy but no JA3 spoofing
+    // (transparent traffic is from mobile devices, not browsers needing spoof)
+    await server.forAnyRequest().always()
+      .thenPassThrough({
+        ignoreHostHttpsErrors: true,
+        proxyConfig,
+      });
+
+    await server.start(this.transparentPort || 0);
+    this.transparentServer = server;
+
+    // TLS capture on the transparent server too
+    this.setupTlsCapture(server);
   }
 
   // ── Internal: TLS Capture ──
@@ -1249,7 +1364,7 @@ export class ProxyManager {
 
   // ── Internal: Event Listeners ──
 
-  private setupEventListeners(server: mockttp.Mockttp): void {
+  private setupEventListeners(server: mockttp.Mockttp, source: TrafficSource = "explicit"): void {
     server.on("request", (req: CompletedRequest) => {
       const requestBody = req.body.buffer;
       const shouldCaptureFullBody = this.sessionStore.getActiveProfile() === "full";
@@ -1273,6 +1388,7 @@ export class ProxyManager {
       const exchange: CapturedExchange = {
         id: req.id,
         timestamp: Date.now(),
+        source,
         request: {
           method: req.method,
           url: req.url,
@@ -1372,6 +1488,9 @@ export class ProxyManager {
     this.traffic.push(exchange);
     if (this.traffic.length > MAX_TRAFFIC_ENTRIES) {
       this.traffic.splice(0, this.traffic.length - MAX_TRAFFIC_ENTRIES);
+    }
+    if (exchange.source === "transparent") {
+      this.transparentTrafficCount++;
     }
   }
 
