@@ -18,8 +18,9 @@ export function registerTrafficTools(server: McpServer): void {
       url_filter: z.string().optional().describe("Filter by URL substring"),
       status_filter: z.number().optional().describe("Filter by response status code"),
       hostname_filter: z.string().optional().describe("Filter by hostname substring"),
+      source_filter: z.enum(["explicit", "transparent"]).optional().describe("Filter by traffic source: 'explicit' (proxy-configured) or 'transparent' (iptables-redirected)"),
     },
-    async ({ limit, offset, method_filter, url_filter, status_filter, hostname_filter }) => {
+    async ({ limit, offset, method_filter, url_filter, status_filter, hostname_filter, source_filter }) => {
       let traffic = proxyManager.getTraffic();
 
       if (method_filter) {
@@ -37,6 +38,9 @@ export function registerTrafficTools(server: McpServer): void {
         const h = hostname_filter.toLowerCase();
         traffic = traffic.filter((t) => t.request.hostname.toLowerCase().includes(h));
       }
+      if (source_filter) {
+        traffic = traffic.filter((t) => t.source === source_filter);
+      }
 
       const total = traffic.length;
       const page = traffic.slice(offset, offset + limit);
@@ -45,6 +49,7 @@ export function registerTrafficTools(server: McpServer): void {
       const summaries = page.map((t) => ({
         id: t.id,
         timestamp: t.timestamp,
+        source: t.source ?? "explicit",
         method: t.request.method,
         url: t.request.url,
         hostname: t.request.hostname,

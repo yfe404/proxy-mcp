@@ -152,20 +152,58 @@ export class AndroidAdbInterceptor implements Interceptor {
         try { unlinkSync(localTmp); } catch { /* ignore */ }
       }
 
-      // Mount tmpfs overlay on cacerts dir and copy cert
+      // Inject cert into system CA store via tmpfs overlay.
+      // Key: save existing certs BEFORE mounting, then restore + add ours.
+      // Handles mount stacking (unmount previous overlays first).
       const sdkStr = await adbShell(serial, "getprop ro.build.version.sdk").catch(() => "30");
       const sdk = parseInt(sdkStr, 10);
 
-      // Standard system cert path
-      await adbShell(serial, `su -c "mount -t tmpfs tmpfs /system/etc/security/cacerts 2>/dev/null; cp /system/etc/security/cacerts_orig/* /system/etc/security/cacerts/ 2>/dev/null; cp ${tmpPath} /system/etc/security/cacerts/${certFileName}; chmod 644 /system/etc/security/cacerts/${certFileName}; chown root:root /system/etc/security/cacerts/${certFileName}"`).catch(() => {
+      const CACERTS = "/system/etc/security/cacerts";
+      const APEX_CACERTS = "/apex/com.android.conscrypt/cacerts";
+      const STAGING = "/data/local/tmp/cacerts_staging";
+      // Determine the source cert dir (apex on 14+, system otherwise)
+      const certSource = sdk >= 34 ? APEX_CACERTS : CACERTS;
+
+      await adbShell(serial, `su -c '
+        # Unstacking: remove any existing tmpfs overlays to access real certs
+        while umount "${CACERTS}" 2>/dev/null; do :; done
+        while umount "${APEX_CACERTS}" 2>/dev/null; do :; done
+
+        # Save real certs BEFORE mount
+        rm -rf "${STAGING}"; mkdir -p "${STAGING}"
+        cp ${certSource}/* "${STAGING}/" 2>/dev/null
+        cp ${CACERTS}/* "${STAGING}/" 2>/dev/null
+
+        # Add proxy cert to staging
+        cp ${tmpPath} "${STAGING}/${certFileName}"
+        chmod 644 "${STAGING}/${certFileName}"
+
+        # Mount tmpfs on system cacerts and restore
+        mount -t tmpfs tmpfs "${CACERTS}"
+        cp "${STAGING}"/* "${CACERTS}/"
+        chcon u:object_r:system_file:s0 "${CACERTS}"/* 2>/dev/null
+        chmod 644 "${CACERTS}"/*
+        chown root:root "${CACERTS}"/*
+      '`).catch(() => {
         // Fallback: try without tmpfs mount (already rw)
-        return adbShell(serial, `su -c "cp ${tmpPath} /system/etc/security/cacerts/${certFileName} && chmod 644 /system/etc/security/cacerts/${certFileName}"`);
+        return adbShell(serial, `su -c "cp ${tmpPath} ${CACERTS}/${certFileName} && chmod 644 ${CACERTS}/${certFileName}"`);
       });
 
-      // Android 14+ APEX conscrypt module
+      // Android 14+: also overlay apex conscrypt certs and inject into zygote
+      // mount namespace so all app processes (forked from zygote) see the cert
       if (sdk >= 34) {
-        await adbShell(serial, `su -c "cp ${tmpPath} /apex/com.android.conscrypt/cacerts/${certFileName} 2>/dev/null; chmod 644 /apex/com.android.conscrypt/cacerts/${certFileName} 2>/dev/null"`).catch(() => {
-          // Not all devices have this path
+        await adbShell(serial, `su -c '
+          ZYGOTE_PID=$(pidof zygote64 || pidof zygote)
+          if [ -n "$ZYGOTE_PID" ]; then
+            nsenter --mount=/proc/$ZYGOTE_PID/ns/mnt -- sh -c "
+              mount -t tmpfs tmpfs ${APEX_CACERTS}
+              cp ${STAGING}/* ${APEX_CACERTS}/
+              chcon u:object_r:system_file:s0 ${APEX_CACERTS}/* 2>/dev/null
+              chmod 644 ${APEX_CACERTS}/*
+            "
+          fi
+        '`).catch(() => {
+          // zygote injection not available on all devices
         });
       }
 
