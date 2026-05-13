@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.2.0
+
+### New Features
+
+- **3 JS execution / injection tools, uniform across cloakbrowser + camoufox:**
+  - `interceptor_browser_evaluate` — run a JS file in the page (`page.evaluate`), return the JSON-serialised result. File body is wrapped as `(__args) => { ... }` so it can `return` directly. `world: "isolated"` (default, stealthy) or `world: "main"` (camoufox-only via `mw:` prefix; requires `main_world_eval: true` at launch — detected up-front with a clear error message).
+  - `interceptor_browser_inject_init_script` — inject a JS file as `page.addInitScript`, runs before every page script on next navigation. Safest stealth primitive on cloakbrowser; on camoufox runs in privileged Juggler scope and does NOT patch main world ([camoufox#48](https://github.com/daijro/camoufox/issues/48)) — the tool returns this caveat in its response.
+  - `interceptor_browser_add_script_tag` — `page.addScriptTag` wrapper. Marked DOM-visible / not stealth in the tool description and return payload.
+- All three accept an absolute `script_path` (no inline-source param). Per-backend stealth tradeoffs documented in the README "Browser DevTools-equivalents" section.
+- `camoufox` launch result `details` now carries `main_world_eval: boolean` so downstream tools can branch on capability.
+
 ## 3.0.0
 
 ### New Features
