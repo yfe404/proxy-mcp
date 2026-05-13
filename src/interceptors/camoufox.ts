@@ -163,6 +163,7 @@ export class CamoufoxInterceptor implements Interceptor {
       humanize: options.humanize ?? null,
       geoip,
       block_webrtc: blockWebrtc,
+      main_world_eval: Boolean(params.main_world_eval),
       ...(options.os !== undefined ? { os: options.os } : {}),
       ...(options.locale !== undefined ? { locale: options.locale } : {}),
       profileDir,

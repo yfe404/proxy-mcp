@@ -23,12 +23,12 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { dirname, isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
 import { proxyManager } from "../state.js";
 import { truncateResult } from "../utils.js";
-import { getEntry, getBrowserEntry, getPageForTarget } from "../browser/session.js";
+import { getEntry, getBrowserEntry, getPageForTarget, isCamoufoxTarget } from "../browser/session.js";
 
 function errorToString(e: unknown): string {
   if (e instanceof Error) return e.message;
@@ -694,6 +694,162 @@ export function registerDevToolsTools(server: McpServer): void {
               value_length: capped.valueLength,
               value_truncated: capped.truncated,
               value_max_chars: capped.maxChars,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  // ── JS execution / injection ───────────────────────────────────
+
+  server.tool(
+    "interceptor_browser_evaluate",
+    "Execute a JS file in the page and return its result. " +
+    "Source is loaded from `script_path` (absolute path). The file body is wrapped in an arrow " +
+    "function receiving `__args` (so the file may `return value;` directly and access the optional " +
+    "args object). " +
+    "Worlds: `isolated` (default, safe — page JS cannot see the call) or `main` (Camoufox-only via " +
+    "`mw:` prefix; REQUIRES `main_world_eval: true` at camoufox launch; fully observable from page). " +
+    "Cloakbrowser does not support main-world evaluate via Playwright — use `interceptor_browser_inject_init_script` for main-world patching there. " +
+    "Rate-limit on cloakbrowser before reCAPTCHA: each call emits CDP traffic that behavioural scorers count.",
+    {
+      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      script_path: z.string().describe("Absolute path to a .js file. File body is the function body; use `return` to send a value back."),
+      args: z.record(z.unknown()).optional().describe("Optional JSON-serialisable args object, available inside the script as `__args`."),
+      world: z.enum(["isolated", "main"]).optional().default("isolated")
+        .describe("`isolated` (default) or `main`. Main world only works on camoufox with `main_world_eval: true`."),
+      value_max_chars: z.number().optional().default(HARD_VALUE_CAP_CHARS)
+        .describe(`Max characters of the JSON-stringified return value (default: ${HARD_VALUE_CAP_CHARS}).`),
+    },
+    async ({ target_id, script_path, args, world, value_max_chars }) => {
+      try {
+        if (!isAbsolute(script_path)) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `script_path must be absolute: '${script_path}'` }) }] };
+        }
+        const source = await readFile(script_path, "utf-8");
+        const page = await getPageForTarget(target_id);
+        const isCamoufox = isCamoufoxTarget(target_id);
+
+        if (world === "main") {
+          if (!isCamoufox) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              status: "error",
+              error: "world: 'main' is only supported on camoufox targets. On cloakbrowser, use interceptor_browser_inject_init_script for main-world patching.",
+            }) }] };
+          }
+          const entry = getEntry(target_id);
+          const mwEnabled = Boolean((entry.target.details as { main_world_eval?: boolean } | undefined)?.main_world_eval);
+          if (!mwEnabled) {
+            return { content: [{ type: "text", text: JSON.stringify({
+              status: "error",
+              error: "Camoufox target launched without main_world_eval=true; main-world evaluate is disabled. Relaunch with `main_world_eval: true`.",
+            }) }] };
+          }
+        }
+
+        const argsLiteral = JSON.stringify(args ?? {});
+        const fnExpr = `((__args) => { ${source}\n })(${argsLiteral})`;
+        const pageFunction = world === "main" && isCamoufox ? `mw:${fnExpr}` : fnExpr;
+
+        const result = await page.evaluate(pageFunction);
+        const serialised = result === undefined ? "" : JSON.stringify(result);
+        const capped = capValue(serialised, Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? HARD_VALUE_CAP_CHARS))));
+
+        return {
+          content: [{
+            type: "text",
+            text: truncateResult({
+              status: "success",
+              target_id,
+              world,
+              backend: isCamoufox ? "camoufox" : "cloakbrowser",
+              value: capped.value,
+              value_length: capped.valueLength,
+              value_truncated: capped.truncated,
+              value_max_chars: capped.maxChars,
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "interceptor_browser_inject_init_script",
+    "Inject a JS file as an init script (Playwright `page.addInitScript`). " +
+    "Runs before any page script on every subsequent navigation/frame, in the isolated world. " +
+    "Safest stealth primitive on cloakbrowser — no DOM artifact, no `Function.toString` leak. " +
+    "On camoufox the script runs in the privileged Juggler scope and does NOT patch the page's main " +
+    "world (see camoufox#48); use the camoufox-add_init_script WebExtension at launch time for main-world patching. " +
+    "Does NOT affect the currently loaded document — navigate again to apply.",
+    {
+      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      script_path: z.string().describe("Absolute path to a .js file to inject before page scripts on every load."),
+    },
+    async ({ target_id, script_path }) => {
+      try {
+        if (!isAbsolute(script_path)) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `script_path must be absolute: '${script_path}'` }) }] };
+        }
+        const source = await readFile(script_path, "utf-8");
+        const page = await getPageForTarget(target_id);
+        await page.addInitScript({ content: source });
+        const isCamoufox = isCamoufoxTarget(target_id);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              status: "success",
+              target_id,
+              backend: isCamoufox ? "camoufox" : "cloakbrowser",
+              bytes: source.length,
+              note: isCamoufox
+                ? "Camoufox: init script runs in privileged Juggler scope and will NOT patch the page's main world (camoufox#48)."
+                : "Applies on next navigation/frame, not the current document.",
+            }),
+          }],
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
+      }
+    },
+  );
+
+  server.tool(
+    "interceptor_browser_add_script_tag",
+    "Append a <script> element to the current page (Playwright `page.addScriptTag`). " +
+    "WARNING: injects a real DOM node visible to MutationObserver, document.scripts, and CSP. " +
+    "Avoid for anti-bot stealth — prefer interceptor_browser_inject_init_script (cloakbrowser) or " +
+    "interceptor_browser_evaluate with world='main' (camoufox + main_world_eval=true).",
+    {
+      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      script_path: z.string().describe("Absolute path to a .js file to inject as <script>."),
+      script_type: z.enum(["classic", "module"]).optional().default("classic")
+        .describe("`classic` (default) or `module`."),
+    },
+    async ({ target_id, script_path, script_type }) => {
+      try {
+        if (!isAbsolute(script_path)) {
+          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `script_path must be absolute: '${script_path}'` }) }] };
+        }
+        const source = await readFile(script_path, "utf-8");
+        const page = await getPageForTarget(target_id);
+        await page.addScriptTag({ content: source, type: script_type === "module" ? "module" : undefined });
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              status: "success",
+              target_id,
+              backend: isCamoufoxTarget(target_id) ? "camoufox" : "cloakbrowser",
+              bytes: source.length,
+              script_type,
+              warning: "DOM-visible injection. Detectable by MutationObserver/document.scripts/CSP.",
             }),
           }],
         };

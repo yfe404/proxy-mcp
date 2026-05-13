@@ -36,6 +36,10 @@ function isCamoufoxTargetId(targetId: string): boolean {
   return typeof targetId === "string" && targetId.startsWith("camoufox_");
 }
 
+export function isCamoufoxTarget(targetId: string): boolean {
+  return isCamoufoxTargetId(targetId);
+}
+
 async function ensureCamoufoxPage(entry: CamoufoxEntryWithDriver): Promise<Page> {
   if (entry.page && !entry.page.isClosed()) return entry.page;
   if (!entry.browser) {
