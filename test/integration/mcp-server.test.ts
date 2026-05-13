@@ -54,7 +54,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 71 tools", async () => {
+  it("lists all 74 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -98,6 +98,9 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("interceptor_browser_get_storage_value"));
     assert.ok(names.includes("interceptor_browser_list_network_fields"));
     assert.ok(names.includes("interceptor_browser_get_network_field"));
+    assert.ok(names.includes("interceptor_browser_evaluate"));
+    assert.ok(names.includes("interceptor_browser_inject_init_script"));
+    assert.ok(names.includes("interceptor_browser_add_script_tag"));
     // Session persistence tools
     assert.ok(names.includes("proxy_session_start"));
     assert.ok(names.includes("proxy_session_stop"));
@@ -117,7 +120,7 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_list_fingerprint_presets"));
     assert.ok(names.includes("proxy_check_fingerprint_runtime"));
     assert.ok(names.includes("proxy_search_session_bodies"));
-    assert.equal(names.length, 71);
+    assert.equal(names.length, 74);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {

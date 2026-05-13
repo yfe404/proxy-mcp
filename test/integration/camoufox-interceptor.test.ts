@@ -123,23 +123,12 @@ describe("Camoufox interceptor (integration)", { skip: !camoufoxAvailable() ? "c
     assert.ok(pidAlive(pid), "python launcher should be alive after launch");
   });
 
-  // FIXME: Playwright firefox's BrowserServer + remote newContext doesn't
-  // propagate the launch-level proxy to new contexts created via the WS
-  // (`browser.newContext({ proxy: {...} })` is also not honoured for the
-  // server-side firefox process). The mscdirect-actor end-to-end smoke
-  // exercises the real production path (Phase 4 deploy + per-endpoint
-  // smoke), so this is the cheaper assertion to skip until upstream
-  // Playwright supports remote-context proxy. See
-  // https://github.com/microsoft/playwright/issues/<TBD>.
-  it.skip("drives the camoufox target via interceptor_browser_navigate and routes traffic through the proxy", { timeout: SUITE_TIMEOUT }, async () => {
+  it("drives the camoufox target via interceptor_browser_navigate and routes traffic through the proxy", { timeout: SUITE_TIMEOUT }, async () => {
     const beforeRes = parseToolResult(
       await client.callTool({ name: "proxy_list_traffic", arguments: {} }) as { content: Array<{ text: string }> },
     );
-    const beforeCount = ((beforeRes.traffic as unknown[]) ?? []).length;
+    const beforeCount = ((beforeRes.exchanges as unknown[]) ?? []).length;
 
-    // Drive via the same MCP tool callers will use in production. This
-    // exercises session.ts's lazy `firefox.connect` + proxy-wired
-    // newContext path (the camoufox driver this branch ships).
     const navRes = parseToolResult(
       await client.callTool({
         name: "interceptor_browser_navigate",
@@ -158,11 +147,10 @@ describe("Camoufox interceptor (integration)", { skip: !camoufoxAvailable() ? "c
     const afterRes = parseToolResult(
       await client.callTool({ name: "proxy_list_traffic", arguments: {} }) as { content: Array<{ text: string }> },
     );
-    const traffic = (afterRes.traffic as Array<{ request: { hostname: string }; response?: { statusCode: number } }>) ?? [];
-    assert.ok(traffic.length > beforeCount, `expected new proxy traffic; before=${beforeCount} after=${traffic.length}`);
-    const example = traffic.find((t) => t.request.hostname === "example.com");
+    const exchanges = (afterRes.exchanges as Array<{ hostname: string; status: number | null }>) ?? [];
+    assert.ok(exchanges.length > beforeCount, `expected new proxy traffic; before=${beforeCount} after=${exchanges.length}`);
+    const example = exchanges.find((t) => t.hostname === "example.com");
     assert.ok(example, "expected an example.com entry in proxy traffic");
-    // Keep the WS reference live across this and the close test.
     void wsUrl;
   });
 
