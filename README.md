@@ -459,7 +459,7 @@ Browser automation uses [cloakbrowser](https://cloakbrowser.dev/) — a stealth-
 
 | Capability | proxy-mcp |
 |---|---|
-| See/modify DOM, run JS in page | Via `interceptor_browser_snapshot` + `interceptor_browser_list_storage_keys` (also reachable from custom scripts via `page.evaluate`) |
+| See/modify DOM, run JS in page | `interceptor_browser_evaluate` (run JS file, return value), `interceptor_browser_inject_init_script` (pre-document hook, every navigation), `interceptor_browser_add_script_tag` (DOM-visible — avoid for stealth); plus `interceptor_browser_snapshot` for ARIA reads |
 | Read cookies, localStorage, sessionStorage | Yes — `interceptor_browser_list_cookies`, `interceptor_browser_list_storage_keys` |
 | Capture HTTP request/response bodies | Via the MITM proxy (4 KB preview cap by default; `full` capture profile on persisted sessions stores complete bodies) |
 | Modify requests in-flight (headers, body, mock, drop) | Yes (declarative rules, hot-reload) |
@@ -665,9 +665,9 @@ Sets 18+ env vars covering curl, Node.js, Python requests, Deno, Git, npm/yarn.
 
 Two modes: `exec` (live injection, existing processes need restart) and `restart` (stop + restart container). Uses `host.docker.internal` for proxy URL.
 
-### Browser DevTools-equivalents (9)
+### Browser DevTools-equivalents (12)
 
-Playwright-driven tools for the browser target. Each takes a `target_id` directly — no session binding, no sidecar.
+Playwright-driven tools for the browser target. Each takes a `target_id` directly — no session binding, no sidecar. Works on both cloakbrowser (`browser_*` IDs) and camoufox (`camoufox_*` IDs) targets via the shared `getPageForTarget()` resolver.
 
 | Tool | Description |
 |------|-------------|
@@ -680,8 +680,54 @@ Playwright-driven tools for the browser target. Each takes a `target_id` directl
 | `interceptor_browser_get_storage_value` | Get one storage value by `item_id` |
 | `interceptor_browser_list_network_fields` | Header field listing from proxy-captured traffic since the browser was launched |
 | `interceptor_browser_get_network_field` | Get one full header field value by `field_id` |
+| `interceptor_browser_evaluate` | Run a JS file in the page (file body wrapped as `(__args) => { ... }`); returns the result. `world: "isolated"` (default, stealthy) or `world: "main"` (camoufox-only, requires `main_world_eval: true` at launch) |
+| `interceptor_browser_inject_init_script` | Inject a JS file as `page.addInitScript` — runs before every page script on the next navigation. Safest stealth primitive on cloakbrowser; on camoufox runs in privileged Juggler scope and does NOT patch main world ([camoufox#48](https://github.com/daijro/camoufox/issues/48)) |
+| `interceptor_browser_add_script_tag` | Append a `<script>` to the current page. **DOM-visible — avoid for stealth.** Use for benign payloads where main-world execution + page visibility is intentional |
 
 Network data is sourced from the MITM proxy rather than a browser-side protocol — the proxy sees every wire request regardless of what the browser reported.
+
+**Stealth tradeoffs for JS injection:**
+
+| Method | Cloakbrowser | Camoufox |
+|---|---|---|
+| `evaluate` isolated | Safe (isolated utility world) — rate-limit before reCAPTCHA, each call is CDP traffic | Safe (Juggler isolated world, invisible to page JS) |
+| `evaluate` main | Not supported by Playwright API | Supported via `mw:` prefix, requires `main_world_eval: true` at launch; fully observable from page |
+| `inject_init_script` | **Best for stealth** — pre-document, no DOM artifact | Stealthy but inert for main-world patching ([camoufox#48](https://github.com/daijro/camoufox/issues/48)); use [camoufox-add_init_script](https://github.com/techinz/camoufox-add_init_script) WebExtension instead |
+| `add_script_tag` | Detectable (DOM node, MutationObserver, CSP) | Detectable (same) |
+
+References: [Playwright evaluate](https://playwright.dev/docs/evaluating), [Playwright addInitScript](https://playwright.dev/docs/api/class-page#page-add-init-script), [Camoufox main-world eval](https://camoufox.com/python/main-world-eval/), [Camoufox stealth](https://camoufox.com/stealth/).
+
+#### Worlds and isolation — what your JS can and can't see
+
+The two backends ship different world models. Picking the wrong tool is the most common stealth footgun on Camoufox, so the boundary matters.
+
+**Cloakbrowser (Chromium).** Playwright's `evaluate` runs in an isolated "utility" world that *shares globals with the page's main world*. An `addInitScript` patch to `navigator.webdriver` is visible to (a) your subsequent `evaluate` probes AND (b) anti-bot code the site loads. This is the model most "stealth playbooks" assume. Detection vectors are CDP-side (`Runtime.evaluate` chatter) — cloakbrowser's C++ patches mitigate those. The 48 source patches scrub the JS-observable leaks (`__playwright__binding__`, stack-trace `sourceURL` hints) at compile time.
+
+**Camoufox (Firefox via Juggler).** Two strictly separated JS heaps:
+
+- **Main world** — the page's real `window`. Site scripts, anti-bot fingerprint code, and tags injected via `addScriptTag` run here.
+- **Isolated/Juggler world** — Playwright's private scope. Different `window` object, same DOM. `evaluate` (without `mw:`) and `addInitScript` both land here.
+
+Consequence: an `addInitScript` that does `Object.defineProperty(navigator, 'webdriver', { get: () => false })` patches the *isolated* `navigator`. Your subsequent `evaluate` probe reads from the *same* isolated scope, sees the patched value, and returns `false`. The test passes. **But the site's detection code runs in main world and reads the unpatched `navigator`.** The patch is invisible to it. This is exactly [camoufox#48](https://github.com/daijro/camoufox/issues/48).
+
+| Read | Reads from | Sees init-script patch? |
+|---|---|---|
+| `interceptor_browser_evaluate` (no `world`) | isolated | yes |
+| `interceptor_browser_evaluate world: "main"` (camoufox) | main | **no** |
+| Anti-bot JS loaded by the site | main | **no** |
+
+This isn't a Camoufox bug; it's the design. Camoufox spoofs fingerprints in the **C++ binary** (configured at launch via `os`, `fonts`, `webgl_config`, `humanize`, etc.) so main-world JS sees the spoofed values *as if they were the real ones*. The Chromium-era playbook of "patch at runtime via `addInitScript`" is what Camoufox is replacing.
+
+**Practical rules:**
+
+| Use case | Cloakbrowser | Camoufox |
+|---|---|---|
+| Read DOM / extract data | `interceptor_browser_evaluate` (isolated) | `interceptor_browser_evaluate` (isolated) |
+| Modify page state, click via JS | `interceptor_browser_evaluate` (isolated; globals are shared) | `interceptor_browser_evaluate` with `world: "main"` + launch `main_world_eval: true` |
+| Spoof navigator / window fingerprints | `interceptor_browser_inject_init_script` | **Configure at launch (`os`, `fonts`, `webgl_config`, `humanize`, `firefox_user_prefs`).** `inject_init_script` will look like it worked from your isolated probes, but the page won't see it. |
+| Load a 3rd-party JS lib into the page | `interceptor_browser_add_script_tag` (page sees it — usually OK if intentional) | Same — runs in main world (good for the use case), but DOM node is detectable |
+
+Strong stealth corollary on Camoufox: anti-bot code running in main world **literally cannot observe** your `evaluate` reads. No `Function.toString` leak, no stack frames in page scripts, no shadow globals. It's a different world. The same isolation that makes `addInitScript` "fail" makes scraping unobservable.
 
 ### Sessions (13)
 
@@ -786,6 +832,12 @@ humanizer_click  --target_id "browser_<id>" --role "button" --name "Sign in"
 humanizer_type   --target_id "browser_<id>" --text "user@example.com" --wpm 45
 humanizer_scroll --target_id "browser_<id>" --delta_y 300
 humanizer_idle   --target_id "browser_<id>" --duration_ms 2000 --intensity subtle
+
+# Run / inject JS in the page (cloakbrowser + camoufox)
+interceptor_browser_evaluate           --target_id "browser_<id>" --script_path /tmp/probe.js
+interceptor_browser_evaluate           --target_id "camoufox_<id>" --script_path /tmp/probe.js --world main   # camoufox + main_world_eval=true
+interceptor_browser_inject_init_script --target_id "browser_<id>" --script_path /tmp/hook.js   # applies on next navigation
+interceptor_browser_add_script_tag     --target_id "browser_<id>" --script_path /tmp/lib.js    # DOM-visible — avoid for stealth
 
 # Query/export recorded session
 proxy_list_sessions
