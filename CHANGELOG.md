@@ -1,5 +1,29 @@
 # Changelog
 
+## 3.4.0 — 2026-08-28
+
+- **Upstream proxy credentials stay out of transcripts** (#22, #23, PR #24 by
+  @MatousMarik):
+  - `proxy_set_upstream`, `proxy_set_host_upstream`, `proxy_status`, and the
+    `proxy://status` resource now redact upstream URLs: the password is masked,
+    path segments are masked, and the query and fragment are dropped (a
+    `pac+http://` token can live in any of those). The username is deliberately
+    preserved — for providers like Apify Proxy it encodes proxy group, country
+    and session id. An unparseable `proxy_url` is now rejected with an error
+    instead of echoed back.
+  - New env vars `PROXY_MCP_UPSTREAM_PASSWORD` + `PROXY_MCP_UPSTREAM_HOST`: a
+    `proxy_url` with a username but no password gets the password filled in
+    from the environment, but only when the URL's hostname matches the pinned
+    host — so the credential never appears in a tool call and cannot be
+    delivered to an arbitrary host. Responses report `passwordSource`
+    (`env` | `url` | `none`; `password_source` on `proxy_mobile_setup`).
+  - The password is scrubbed from the environment of processes spawned via
+    `interceptor_spawn` and the Camoufox launcher (defence-in-depth).
+  - Behavior notes: redacted URLs are also URL-normalized (an `http://`
+    upstream gains a trailing `/`); a socks upstream is refused when the env
+    password contains `:` (socks-proxy-agent would truncate it); a `:` in the
+    username is refused on every scheme.
+
 ## 3.3.2 — 2026-05-17
 
 - **Camoufox OS default + introspection:** `interceptor_camoufox_launch` now
