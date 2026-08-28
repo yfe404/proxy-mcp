@@ -9,6 +9,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { writeCertTempFile } from "./cert-utils.js";
 import type { Interceptor, InterceptorMetadata, ActivateOptions, ActivateResult, ActiveTarget } from "./types.js";
+import { spawnEnv } from "../utils.js";
 
 const MAX_OUTPUT_BUFFER = 8192;
 
@@ -84,7 +85,7 @@ export class TerminalInterceptor implements Interceptor {
 
     const child = spawn(command, args ?? [], {
       cwd,
-      env: proxyEnv,
+      env: spawnEnv(proxyEnv),
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });

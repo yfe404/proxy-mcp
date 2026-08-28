@@ -196,3 +196,41 @@ describe("ProxyManager", () => {
     );
   });
 });
+
+describe("ProxyManager upstream redaction", () => {
+  const SECRET = "s3cret-upstream-password";
+
+  it("redacts credentials in getStatus() but keeps them for routing", async () => {
+    const pm = new ProxyManager();
+    await pm.setGlobalUpstream({ proxyUrl: `http://user:${SECRET}@proxy.example.com:8000` });
+    await pm.setHostUpstream("api.example.com", {
+      proxyUrl: `socks5://u:${SECRET}@socks.example.com:1080`,
+    });
+
+    const status = pm.getStatus() as {
+      globalUpstream: { proxyUrl: string } | null;
+      hostUpstreams: Record<string, { proxyUrl: string }>;
+    };
+
+    // Status must never carry the raw password.
+    assert.ok(!JSON.stringify(status).includes(SECRET));
+    assert.ok(status.globalUpstream!.proxyUrl.includes(":***@"));
+    assert.ok(status.hostUpstreams["api.example.com"].proxyUrl.includes(":***@"));
+
+    // ...while the stored config keeps it, or resolveProxyConfig() cannot route.
+    assert.equal(
+      pm.getGlobalUpstream()?.proxyUrl,
+      `http://user:${SECRET}@proxy.example.com:8000`,
+    );
+    assert.equal(
+      pm.getHostUpstreams().get("api.example.com")?.proxyUrl,
+      `socks5://u:${SECRET}@socks.example.com:1080`,
+    );
+  });
+
+  it("reports no upstream as null rather than a redacted placeholder", () => {
+    const pm = new ProxyManager();
+    const status = pm.getStatus() as { globalUpstream: unknown };
+    assert.equal(status.globalUpstream, null);
+  });
+});

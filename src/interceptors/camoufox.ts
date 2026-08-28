@@ -30,6 +30,7 @@ import { join } from "node:path";
 import type {
   Interceptor, InterceptorMetadata, ActivateOptions, ActivateResult, ActiveTarget,
 } from "./types.js";
+import { spawnEnv } from "../utils.js";
 
 type CamoufoxOs = "windows" | "macos" | "linux";
 
@@ -189,14 +190,12 @@ export class CamoufoxInterceptor implements Interceptor {
     const scriptPath = join(launcherDir, "launch.py");
     await writeFile(scriptPath, buildLauncherScript(params, wsEndpointFile), "utf-8");
 
+    const childEnv = spawnEnv({ NO_COLOR: "1", PYTHONIOENCODING: "utf-8" });
+
     const proc = spawn(pythonExe, [scriptPath], {
       stdio: ["ignore", "pipe", "pipe"],
       cwd: launcherDir,
-      env: {
-        ...process.env,
-        NO_COLOR: "1",
-        PYTHONIOENCODING: "utf-8",
-      },
+      env: childEnv,
     });
 
     let handshake: WsHandshake;

@@ -13,7 +13,7 @@ import type * as mockttp from "mockttp";
 import type { CompletedRequest, CompletedResponse, ProxyConfig } from "mockttp";
 import { randomUUID } from "node:crypto";
 import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
-import { serializeHeaders, capString } from "./utils.js";
+import { serializeHeaders, capString, redactProxyUrl } from "./utils.js";
 import { enableServerTlsCapture, type ServerTlsCapture } from "./tls-utils.js";
 import { spoofedRequest, shutdownSpoofContainer, stripHopByHopHeaders } from "./tls-spoof.js";
 import { applyFingerprintHeaderOverrides } from "./spoof-headers.js";
@@ -342,6 +342,11 @@ function rewriteReplayUrl(originalUrl: string, targetBaseUrl?: string): string {
   return new URL(`${original.pathname}${original.search}`, base).toString();
 }
 
+/** Copy an upstream config with its proxy URL redacted, for status output. */
+function redactUpstreamConfig(config: UpstreamProxyConfig): UpstreamProxyConfig {
+  return { ...config, proxyUrl: redactProxyUrl(config.proxyUrl) };
+}
+
 // ── ProxyManager ──
 
 let nextRuleId = 1;
@@ -502,8 +507,12 @@ export class ProxyManager {
       port: this.port,
       url: this.server?.url ?? null,
       certFingerprint: this.cert?.fingerprint ?? null,
-      globalUpstream: this.globalUpstream,
-      hostUpstreams: Object.fromEntries(this.hostUpstreams),
+      // Redacted on the way out only: resolveProxyConfig() reads the stored
+      // proxyUrl to actually route, so those must keep their real credentials.
+      globalUpstream: this.globalUpstream && redactUpstreamConfig(this.globalUpstream),
+      hostUpstreams: Object.fromEntries(
+        [...this.hostUpstreams].map(([host, config]) => [host, redactUpstreamConfig(config)]),
+      ),
       ruleCount: this.rules.size,
       trafficCount: this.traffic.length,
       transparentProxy: this.getTransparentStatus(),
