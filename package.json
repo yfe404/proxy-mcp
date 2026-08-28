@@ -1,6 +1,10 @@
 {
   "name": "proxy-mcp",
   "version": "3.4.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yfe404/proxy-mcp.git"
+  },
   "description": "MCP server for HTTP/HTTPS MITM proxy via mockttp",
   "type": "module",
   "engines": {
