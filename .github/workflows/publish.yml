@@ -1,4 +1,4 @@
-name: Publish to npm
+name: Release
 
 on:
   push:
@@ -16,22 +16,25 @@ jobs:
       - run: npm run build
       - run: npm run test:unit
 
-  publish:
+  release:
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write # OIDC for npm trusted publishing
     steps:
       - uses: actions/checkout@v4
+      # Sanity-check the exact thing users run: a git install must build via
+      # the prepare script and produce the bin.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
-      # Trusted publishing needs npm >= 11.5.1; Node 22 bundles npm 10.
-      - run: npm install -g npm@latest
-      - run: npm ci
-      - run: npm publish --access public
+      - name: Verify git-install path
+        run: |
+          mkdir /tmp/git-install-check && cd /tmp/git-install-check
+          npm init -y >/dev/null
+          npm install "github:${{ github.repository }}#${{ github.ref_name }}"
+          test -x node_modules/.bin/proxy-mcp
+          node -e "require.resolve('proxy-mcp/dist/index.js', { paths: [process.cwd()] })"
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

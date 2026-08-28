@@ -2,6 +2,11 @@
 
 ## 3.4.0 — 2026-08-28
 
+- **Distribution moved from npmjs to GitHub.** Install/update via
+  `npx -y "github:yfe404/proxy-mcp#semver:^3"` (resolves against version tags).
+  Versions ≤ 3.3.2 remain on npm but receive no further updates. A `prepare`
+  script builds `dist/` on install, so git installs work out of the box.
+
 - **Upstream proxy credentials stay out of transcripts** (#22, #23, PR #24 by
   @MatousMarik):
   - `proxy_set_upstream`, `proxy_set_host_upstream`, `proxy_status`, and the

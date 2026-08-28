@@ -4,6 +4,20 @@ proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It 
 
 74 tools + 8 resources + 3 resource templates. Built on [mockttp](https://github.com/httptoolkit/mockttp), [cloakbrowser](https://cloakbrowser.dev/), and [Camoufox](https://camoufox.com/).
 
+> [!IMPORTANT]
+> **proxy-mcp is no longer published to npmjs.** npm's publishing system has
+> become too annoying to be worth it — expiring tokens that silently break
+> releases, and a mandatory passkey/2FA enrollment maze just to change a
+> package setting. Distribution now happens directly from this repository:
+>
+> ```bash
+> npx -y "github:yfe404/proxy-mcp#semver:^3"
+> ```
+>
+> Versions ≤ 3.3.2 remain on npmjs but will never be updated —
+> `npx -y proxy-mcp@latest` silently stays stale. Update your MCP config to the
+> GitHub form above. See [Setup](#setup).
+
 ## Table of Contents
 
 - [Setup](#setup)
@@ -33,20 +47,29 @@ proxy-mcp is an MCP server that runs an explicit HTTP/HTTPS MITM proxy (L7). It 
 ### Quick install (Claude Code)
 
 ```bash
-claude mcp add proxy-mcp -- npx -y proxy-mcp@latest
+claude mcp add proxy-mcp -- npx -y "github:yfe404/proxy-mcp#semver:^3"
 ```
 
-This installs proxy-mcp as an MCP server using stdio transport. It auto-updates on every Claude Code restart.
+This installs proxy-mcp as an MCP server using stdio transport, straight from
+GitHub — no registry involved. The `#semver:^3` range resolves against this
+repo's version tags, so new releases are picked up automatically.
+
+> **Note:** the first install compiles from source (a `prepare` build), so it
+> takes a few seconds longer than a registry tarball — subsequent launches use
+> the npx cache. Why not npmjs anymore? See the [announcement](#proxy-mcp) at
+> the top: their publishing system got too annoying.
 
 **Scopes:**
 
 ```bash
 # Per-user (available in all projects)
-claude mcp add --scope user proxy-mcp -- npx -y proxy-mcp@latest
+claude mcp add --scope user proxy-mcp -- npx -y "github:yfe404/proxy-mcp#semver:^3"
 
 # Per-project (shared via .mcp.json, commit to repo)
-claude mcp add --scope project proxy-mcp -- npx -y proxy-mcp@latest
+claude mcp add --scope project proxy-mcp -- npx -y "github:yfe404/proxy-mcp#semver:^3"
 ```
+
+To pin an exact release instead, use `github:yfe404/proxy-mcp#v3.4.0`.
 
 ### Prerequisites
 
@@ -83,7 +106,7 @@ The configured server alias controls Claude's generated tool prefix. The example
 
 ```bash
 # stdio (default)
-claude mcp add proxy-mcp -- npx -y proxy-mcp@latest
+claude mcp add proxy-mcp -- npx -y "github:yfe404/proxy-mcp#semver:^3"
 
 # From local clone
 claude mcp add proxy-mcp -- node /path/to/proxy-mcp/dist/index.js
@@ -99,7 +122,7 @@ claude mcp add --transport http proxy-mcp http://127.0.0.1:3001/mcp
   "mcpServers": {
     "proxy-mcp": {
       "command": "npx",
-      "args": ["-y", "proxy-mcp@latest"]
+      "args": ["-y", "github:yfe404/proxy-mcp#semver:^3"]
     }
   }
 }
@@ -210,7 +233,7 @@ started any other way. Put them in the client's server config:
 claude mcp add proxy-mcp \
   -e PROXY_MCP_UPSTREAM_PASSWORD=s3cret \
   -e PROXY_MCP_UPSTREAM_HOST=upstream.example \
-  -- npx -y proxy-mcp@latest
+  -- npx -y "github:yfe404/proxy-mcp#semver:^3"
 ```
 
 ```json
@@ -218,7 +241,7 @@ claude mcp add proxy-mcp \
   "mcpServers": {
     "proxy-mcp": {
       "command": "npx",
-      "args": ["-y", "proxy-mcp@latest"],
+      "args": ["-y", "github:yfe404/proxy-mcp#semver:^3"],
       "env": {
         "PROXY_MCP_UPSTREAM_PASSWORD": "s3cret",
         "PROXY_MCP_UPSTREAM_HOST": "upstream.example"
