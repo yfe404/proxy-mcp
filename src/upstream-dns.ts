@@ -105,8 +105,8 @@ export function createIpv4OnlyLookup(deps: { lookup?: RawDnsLookup; cacheMs?: nu
  * stable object identity that `getDnsLookupFunction`'s memo cache maps to
  * `createIpv4OnlyLookup()`. It is deliberately empty: if the seeding below
  * ever fails we must not hand mockttp a token it would interpret as real
- * cacheable-lookup settings, so `upstreamLookupOptions` returns undefined in
- * that case instead.
+ * cacheable-lookup settings, so `ensureUpstreamLookupOptions` returns
+ * undefined in that case instead.
  */
 const IPV4_LOOKUP_TOKEN: PassThroughLookupOptions = {};
 
@@ -117,7 +117,7 @@ let seeded: "pending" | "ok" | "failed" = "pending";
  * undefined to leave mockttp's default resolver in place (flag off, or the
  * mockttp internals this depends on are not where we expect them).
  */
-export async function upstreamLookupOptions(
+export async function ensureUpstreamLookupOptions(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<PassThroughLookupOptions | undefined> {
   if (!isUpstreamIpv4OnlyEnabled(env)) return undefined;

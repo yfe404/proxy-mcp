@@ -12,7 +12,7 @@
 import type * as mockttp from "mockttp";
 import type { CompletedRequest, CompletedResponse, ProxyConfig } from "mockttp";
 import type { PassThroughLookupOptions } from "mockttp/dist/rules/passthrough-handling-definitions";
-import { upstreamLookupOptions } from "./upstream-dns.js";
+import { ensureUpstreamLookupOptions } from "./upstream-dns.js";
 import { randomUUID } from "node:crypto";
 import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
 import { serializeHeaders, capString, redactProxyUrl } from "./utils.js";
@@ -1131,7 +1131,7 @@ export class ProxyManager {
     // Rules are registered in order — mockttp uses registration order for matching
     // when asPriority() is not used (asPriority has bugs with HTTPS mode).
     const proxyConfig = this.resolveProxyConfig();
-    const lookupOptions = await upstreamLookupOptions();
+    const lookupOptions = await ensureUpstreamLookupOptions();
     const enabledRules = [...this.rules.values()]
       .filter((r) => r.enabled)
       .sort((a, b) => a.priority - b.priority);
@@ -1307,7 +1307,7 @@ export class ProxyManager {
 
     // Apply the same rules as the explicit proxy
     const proxyConfig = this.resolveProxyConfig();
-    const lookupOptions = await upstreamLookupOptions();
+    const lookupOptions = await ensureUpstreamLookupOptions();
     const enabledRules = [...this.rules.values()]
       .filter((r) => r.enabled)
       .sort((a, b) => a.priority - b.priority);

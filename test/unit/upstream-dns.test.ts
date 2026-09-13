@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   createIpv4OnlyLookup,
   isUpstreamIpv4OnlyEnabled,
-  upstreamLookupOptions,
+  ensureUpstreamLookupOptions,
   type RawDnsLookup,
 } from "../../src/upstream-dns.js";
 
@@ -152,13 +152,13 @@ describe("createIpv4OnlyLookup", () => {
   });
 });
 
-describe("upstreamLookupOptions", () => {
+describe("ensureUpstreamLookupOptions", () => {
   it("returns undefined when the flag is off, leaving mockttp's default resolver in place", async () => {
-    assert.equal(await upstreamLookupOptions({ PROXY_MCP_UPSTREAM_IPV4_ONLY: "0" }), undefined);
+    assert.equal(await ensureUpstreamLookupOptions({ PROXY_MCP_UPSTREAM_IPV4_ONLY: "0" }), undefined);
   });
 
   it("returns a token that mockttp resolves to the IPv4-only lookup", async () => {
-    const token = await upstreamLookupOptions({ PROXY_MCP_UPSTREAM_IPV4_ONLY: "1" });
+    const token = await ensureUpstreamLookupOptions({ PROXY_MCP_UPSTREAM_IPV4_ONLY: "1" });
     assert.ok(token, "expected a lookupOptions token");
 
     const { getDnsLookupFunction } = await import("mockttp/dist/rules/passthrough-handling");
@@ -177,8 +177,8 @@ describe("upstreamLookupOptions", () => {
   });
 
   it("returns the same token on repeated calls, so mockttp's memoisation stays warm", async () => {
-    const a = await upstreamLookupOptions({ PROXY_MCP_UPSTREAM_IPV4_ONLY: "1" });
-    const b = await upstreamLookupOptions({ PROXY_MCP_UPSTREAM_IPV4_ONLY: "1" });
+    const a = await ensureUpstreamLookupOptions({ PROXY_MCP_UPSTREAM_IPV4_ONLY: "1" });
+    const b = await ensureUpstreamLookupOptions({ PROXY_MCP_UPSTREAM_IPV4_ONLY: "1" });
     assert.equal(a, b);
   });
 });

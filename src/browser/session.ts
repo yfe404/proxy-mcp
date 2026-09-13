@@ -22,9 +22,6 @@ export function getEntry(targetId: string): BrowserTargetEntry {
   return entry;
 }
 
-/** Alias kept for callers that read as "the cloakbrowser entry, not just any entry". */
-export const getBrowserEntry = getEntry;
-
 export async function getPageForTarget(targetId: string): Promise<Page> {
   const entry = getEntry(targetId);
   if (entry.page.isClosed()) {
