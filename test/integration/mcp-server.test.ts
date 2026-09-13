@@ -63,6 +63,12 @@ describe("MCP Server Integration", () => {
 
     assert.ok(names.includes("proxy_start"));
     assert.ok(names.includes("proxy_stop"));
+    // #26: proxy_stop takes an `all` flag for the old process-wide teardown.
+    const stopTool = tools.find((tool) => tool.name === "proxy_stop")!;
+    assert.ok(
+      Object.keys(stopTool.inputSchema.properties ?? {}).includes("all"),
+      "proxy_stop must advertise the all argument",
+    );
     assert.ok(names.includes("proxy_status"));
     assert.ok(names.includes("proxy_get_ca_cert"));
     assert.ok(names.includes("proxy_set_upstream"));

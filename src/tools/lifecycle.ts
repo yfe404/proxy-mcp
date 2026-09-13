@@ -61,11 +61,18 @@ export function registerLifecycleTools(server: McpServer): void {
 
   server.tool(
     "proxy_stop",
-    "Stop the MITM proxy. Traffic history and CA certificate are retained.",
-    {},
-    async () => {
+    "Stop the MITM proxy. Traffic history and CA certificate are retained. Interceptor targets "
+    + "(browsers, containers, spawned processes) activated by THIS MCP session are deactivated; "
+    + "targets belonging to other sessions keep running. Pass all=true to deactivate every "
+    + "session's targets (the pre-3.5.3, process-wide behaviour). Over stdio there is one session, "
+    + "so every target is deactivated either way.",
+    {
+      all: z.boolean().optional().default(false)
+        .describe("Deactivate every session's interceptor targets, not just this session's (default: false)"),
+    },
+    async ({ all }, extra) => {
       try {
-        await proxyManager.stop();
+        await proxyManager.stop({ ownerSessionId: extra?.sessionId, allTargets: all });
         return {
           content: [{
             type: "text",

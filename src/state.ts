@@ -20,6 +20,7 @@ import { applyFingerprintHeaderOverrides } from "./spoof-headers.js";
 import { interceptorManager } from "./interceptors/manager.js";
 import { cleanupTempCerts } from "./interceptors/cert-utils.js";
 import { ensureSafeNetworkInterfaces } from "./os-shim.js";
+import { installMockttpAbortFilter, logClientAbort } from "./request-log.js";
 import {
   SessionStore,
   type SessionStartOptions,
@@ -47,6 +48,18 @@ export interface CertificateInfo {
   key: string;
   cert: string;
   fingerprint: string;
+}
+
+/** How far ProxyManager.stop() reaches when tearing down interceptor targets. */
+export interface StopOptions {
+  /**
+   * The MCP session asking for the stop. Only the targets activated through
+   * that session are deactivated. Undefined (stdio, or an unknown session)
+   * keeps the process-wide behaviour.
+   */
+  ownerSessionId?: string;
+  /** Deactivate every session's targets, whatever ownerSessionId says. */
+  allTargets?: boolean;
 }
 
 export interface UpstreamProxyConfig {
@@ -408,12 +421,24 @@ export class ProxyManager {
     };
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stop the proxy.
+   *
+   * Interceptor targets are torn down first. `ownerSessionId` scopes that to
+   * the targets the calling MCP session activated, so one HTTP session's
+   * proxy_stop no longer closes another session's browsers (#26). Without a
+   * session id (stdio), or with `allTargets`, every target goes down.
+   */
+  async stop(options: StopOptions = {}): Promise<void> {
     if (!this._running) {
       throw new Error("Proxy is not running.");
     }
-    // Deactivate all interceptors before stopping the proxy
-    await interceptorManager.deactivateAll().catch(() => {});
+    // Deactivate interceptors before stopping the proxy
+    if (!options.allTargets && options.ownerSessionId) {
+      await interceptorManager.deactivateOwnedBy(options.ownerSessionId).catch(() => {});
+    } else {
+      await interceptorManager.deactivateAll().catch(() => {});
+    }
     await cleanupTempCerts().catch(() => {});
     if (this.server) {
       await this.server.stop();
@@ -1058,6 +1083,10 @@ export class ProxyManager {
     if (!this.cert) throw new Error("No certificate");
 
     const mockttp = await getMockttp();
+    // mockttp logs `Failed to handle request: Aborted` for every request the
+    // client cancels. Drop that one line; the cancellation is reported once,
+    // at debug level, from the `abort` listener below (#29).
+    installMockttpAbortFilter();
     const server = mockttp.getLocal({
       https: { key: this.cert.key, cert: this.cert.cert },
     });
@@ -1362,6 +1391,7 @@ export class ProxyManager {
     });
 
     server.on("abort", (req) => {
+      logClientAbort(req);
       const exchange = this.pendingRequests.get(req.id);
       if (exchange) {
         this.pendingRequests.delete(req.id);

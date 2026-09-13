@@ -147,7 +147,7 @@ export function registerInterceptorTools(server: McpServer): void {
       viewport_width: z.number().optional().describe("Viewport width in px"),
       viewport_height: z.number().optional().describe("Viewport height in px"),
     },
-    async ({ url, headless, humanize, human_preset, timezone, locale, viewport_width, viewport_height }) => {
+    async ({ url, headless, humanize, human_preset, timezone, locale, viewport_width, viewport_height }, extra) => {
       try {
         const proxyInfo = requireProxy();
         const viewport = (viewport_width && viewport_height)
@@ -163,7 +163,7 @@ export function registerInterceptorTools(server: McpServer): void {
           timezone,
           locale,
           viewport,
-        });
+        }, extra?.sessionId);
         return {
           content: [{
             type: "text",
@@ -295,7 +295,7 @@ export function registerInterceptorTools(server: McpServer): void {
       cwd: z.string().optional().describe("Working directory (default: current)"),
       env: z.record(z.string()).optional().describe("Additional env vars to set"),
     },
-    async ({ command, args, cwd, env }) => {
+    async ({ command, args, cwd, env }, extra) => {
       try {
         const proxyInfo = requireProxy();
         const result = await interceptorManager.activate("terminal", {
@@ -304,7 +304,7 @@ export function registerInterceptorTools(server: McpServer): void {
           args,
           cwd,
           env,
-        });
+        }, extra?.sessionId);
         return {
           content: [{
             type: "text",
@@ -361,14 +361,14 @@ export function registerInterceptorTools(server: McpServer): void {
       mode: z.enum(["exec", "restart"]).optional().default("exec")
         .describe("Injection mode: 'exec' (live injection) or 'restart' (stop + restart)"),
     },
-    async ({ container_id, mode }) => {
+    async ({ container_id, mode }, extra) => {
       try {
         const proxyInfo = requireProxy();
         const result = await interceptorManager.activate("docker", {
           ...proxyInfo,
           containerId: container_id,
           mode,
-        });
+        }, extra?.sessionId);
         return {
           content: [{
             type: "text",
