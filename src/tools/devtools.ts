@@ -45,6 +45,8 @@ const DEFAULT_VALUE_MAX_CHARS = 256;
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 500;
 const HARD_VALUE_CAP_CHARS = 20000;
+/** `interceptor_browser_evaluate` may return whole documents (a rendered DOM); its cap is the caller's, up to this. */
+const EVALUATE_VALUE_CAP_CHARS = 16_000_000;
 
 function normalizeLimit(limit: number | undefined): number {
   const n = limit ?? DEFAULT_LIST_LIMIT;
@@ -724,7 +726,7 @@ export function registerDevToolsTools(server: McpServer): void {
       script_path: z.string().describe("Absolute path to a .js file. File body is the function body; use `return` to send a value back."),
       args: z.record(z.unknown()).optional().describe("Optional JSON-serialisable args object, available inside the script as `__args`."),
       value_max_chars: z.number().optional().default(HARD_VALUE_CAP_CHARS)
-        .describe(`Max characters of the JSON-stringified return value (default: ${HARD_VALUE_CAP_CHARS}).`),
+        .describe(`Max characters of the JSON-stringified return value (default: ${HARD_VALUE_CAP_CHARS}, max ${EVALUATE_VALUE_CAP_CHARS}).`),
     },
     async ({ target_id, script_path, args, value_max_chars }) => {
       try {
@@ -737,7 +739,7 @@ export function registerDevToolsTools(server: McpServer): void {
         const argsLiteral = JSON.stringify(args ?? {});
         const result = await page.evaluate(`((__args) => { ${source}\n })(${argsLiteral})`);
         const serialised = result === undefined ? "" : JSON.stringify(result);
-        const capped = capValue(serialised, Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? HARD_VALUE_CAP_CHARS))));
+        const capped = capValue(serialised, Math.max(0, Math.min(EVALUATE_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? HARD_VALUE_CAP_CHARS))));
 
         return {
           content: [{

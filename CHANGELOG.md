@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.5.2 — 2026-09-13
+
+- **`interceptor_browser_evaluate` honours `value_max_chars` up to 16 000 000.** The argument existed
+  but was clamped to the 20 000-character default, so a caller reading a rendered DOM had to page it
+  in 20 kB windows (34 round trips for a 511 kB page, measured). The default stays 20 000; the other
+  devtools (cookies, storage) keep their previous caps.
+
 ## 3.5.1 — 2026-09-13
 
 - **cloakbrowser back to 0.3.24 (exact pin).** Measured the same day 3.5.0 shipped: through the
