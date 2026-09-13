@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.5.1 — 2026-09-13
+
+- **cloakbrowser back to 0.3.24 (exact pin).** Measured the same day 3.5.0 shipped: through the
+  same Apify residential CZ route, cloakbrowser 0.3.24 (chromium 146.0.7680.177.2) passes
+  alza.cz's Cloudflare managed challenge in about 12 s, while 0.5.10 (chromium 146.0.7680.177.5,
+  free binary) is still on "Just a moment…" after 36 s and never resolved it across three
+  countries in a full run. The other 3.5.0 changes stay. Bumping cloakbrowser again needs a
+  challenge-passing check on a Cloudflare-managed site, not only example.com.
+
 ## 3.5.0 — 2026-09-13
 
 ### Removed (breaking)

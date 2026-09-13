@@ -1,6 +1,6 @@
 {
   "name": "proxy-mcp",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yfe404/proxy-mcp.git"
@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "cloakbrowser": "^0.5.10",
+    "cloakbrowser": "0.3.24",
     "dockerode": "^4.0.4",
     "impit": "^0.13.0",
     "mockttp": "^3.17.0",
