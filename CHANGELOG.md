@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.4.1 — 2026-09-13
+
+- **Browser targets survive across MCP sessions** (#25). The HTTP transport
+  builds a fresh `McpServer` per session, and each one called
+  `initInterceptors()`, which re-`register`ed every interceptor on the process
+  singleton `interceptorManager`. The second session therefore replaced the
+  `BrowserInterceptor` with an empty instance and the browsers launched by the
+  first session became unreachable (`Browser target '…' not found`) while their
+  Chromium processes stayed alive. `initInterceptors()` is now idempotent: it
+  registers once per process. Tool registration stays per session.
+
 ## 3.4.0 — 2026-08-28
 
 - **Distribution moved from npmjs to GitHub.** Install/update via
