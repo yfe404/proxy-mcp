@@ -58,6 +58,17 @@ describe("HTTP session registry", () => {
     assert.equal(a.transport.closed, 0);
   });
 
+  it("swallows a throwing McpServer.close — it runs inside transport.onclose", async () => {
+    const registry = new HttpSessionRegistry<FakeTransport, FakeServer>();
+    const bad = new FakeServer();
+    bad.close = async () => { throw new Error("already closed"); };
+    registry.add("a", { transport: new FakeTransport("a"), server: bad });
+
+    // An unhandled rejection here would take the process down under Node's default.
+    assert.equal(await registry.close("a"), true);
+    assert.equal(registry.has("a"), false);
+  });
+
   it("closes a session's McpServer exactly once", async () => {
     const { registry, a } = twoSessions();
 

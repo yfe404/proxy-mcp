@@ -19,10 +19,11 @@ import type { ActivateResult, Interceptor, InterceptorMetadata } from "../../src
  */
 
 /**
- * Stands in for an interceptor holding live targets.
+ * Stands in for an interceptor holding live targets, without launching one.
  *
- * It takes a real interceptor id deliberately: re-registering under `browser`
- * is exactly the overwrite that lost `launched` — the reported failure.
+ * `launched` is the live handle a real interceptor would hold: the tests below
+ * assert it survives a second init, a refused re-registration and another
+ * session's teardown.
  */
 class FakeInterceptor implements Interceptor {
   readonly id: string;

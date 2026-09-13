@@ -12,14 +12,19 @@
 - **The `McpServer` of a closed HTTP session is closed.** The transport was removed from the
   session map on close while its `McpServer` stayed alive, so a long-running HTTP server
   accumulated one server per past session (#26). Both halves are now closed and dropped together,
-  and SIGINT closes every live session. The HTTP transport moved out of `src/index.ts` into
-  `src/http-server.ts` so this is testable against real sessions.
-- **A client-aborted request logs one debug line instead of a mockttp error.** When a browser
-  navigates away or a page is torn down, mockttp's `streamToBuffer` rejects with `Error('Aborted')`
-  and mockttp printed `Failed to handle request: Aborted` for every cancelled request — a dozen per
-  discover walk, burying real upstream errors (#29). That one line is now dropped, and the
-  cancellation is reported once as `request aborted by client: <method> <url>`, with no stack, when
-  `PROXY_MCP_DEBUG` is set. Every other request failure keeps its current logging.
+  and SIGINT closes every live session. Ending a session also deactivates the targets it activated:
+  they are owned by a session id no client can name again, so a scoped `proxy_stop` could never
+  reach them. The HTTP transport moved out of `src/index.ts` into `src/http-server.ts` so this is
+  testable against real sessions.
+- **A client-aborted request logs one debug line instead of a mockttp stack.** When a browser
+  navigates away or a page is torn down, mockttp's `streamToBuffer` rejects with `Error('Aborted')`.
+  mockttp then logged it twice per cancelled request: `Failed to handle request: Aborted` from its
+  rule-handler catch, and — the noisy one — a bare `Error('Aborted')` with its full stack from the
+  `.catch(console.error)` in `announceCompletedRequestAsync`, which runs for every request because
+  the proxy listens for the `request` event. A dozen per discover walk, burying real upstream
+  errors (#29). Both are now dropped, and the cancellation is reported once as
+  `request aborted by client: <method> <url>`, with no stack, when `PROXY_MCP_DEBUG` is set. Every
+  other request failure keeps its current logging.
 - **`InterceptorManager.register()` throws on a duplicate id.** It silently replaced the existing
   entry, which is how #25 orphaned live browser handles. The registry holds live handles, so the
   invariant is now structural rather than a guard at the single call site.

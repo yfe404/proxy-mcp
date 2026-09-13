@@ -63,7 +63,8 @@ export function registerLifecycleTools(server: McpServer): void {
     "proxy_stop",
     "Stop the MITM proxy. Traffic history and CA certificate are retained. Interceptor targets "
     + "(browsers, containers, spawned processes) activated by THIS MCP session are deactivated; "
-    + "targets belonging to other sessions keep running. Pass all=true to deactivate every "
+    + "targets belonging to other MCP sessions keep running, though the proxy they were pointed "
+    + "at is gone until someone calls proxy_start again. Pass all=true to deactivate every "
     + "session's targets (the pre-3.5.3, process-wide behaviour). Over stdio there is one session, "
     + "so every target is deactivated either way.",
     {

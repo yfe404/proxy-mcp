@@ -93,6 +93,9 @@ node dist/index.js --transport http --port 3001
 
 `--transport` and `--port` also accept env vars `TRANSPORT` and `PORT`.
 
+`PROXY_MCP_DEBUG=1` adds debug lines to stderr, one per request the client
+cancels: `request aborted by client: <method> <url>`.
+
 `PROXY_MCP_UPSTREAM_PASSWORD` and `PROXY_MCP_UPSTREAM_HOST` keep an upstream
 proxy password out of the transcript — see
 [Keeping the upstream password out of the transcript](#keeping-the-upstream-password-out-of-the-transcript).

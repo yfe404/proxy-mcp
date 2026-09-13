@@ -51,12 +51,29 @@ describe("client-abort detection", () => {
 });
 
 describe("mockttp abort-log filter", () => {
-  it("matches exactly mockttp's per-request abort line", () => {
+  it("matches the two-argument line from mockttp's rule-handler catch", () => {
     assert.equal(isMockttpRequestAbortLog(["Failed to handle request:", "Aborted"]), true);
     assert.equal(
       isMockttpRequestAbortLog(["Failed to handle request:", new Error("Aborted")]),
       true,
     );
+  });
+
+  /**
+   * mockttp's announceCompletedRequestAsync does
+   * `waitForCompletedRequest(...).catch(console.error)`, so a cancelled
+   * request logs a bare Error — printed with its full stack. This fires for
+   * every aborted request once anything listens for the `request` event, which
+   * ProxyManager always does, and it is the flood #29 reported.
+   */
+  it("matches the bare Error('Aborted') logged by the announce handlers", () => {
+    assert.equal(isMockttpRequestAbortLog([new Error("Aborted")]), true);
+  });
+
+  it("does not swallow an unrelated single-argument error", () => {
+    assert.equal(isMockttpRequestAbortLog([new Error("ECONNRESET")]), false);
+    assert.equal(isMockttpRequestAbortLog(["Aborted"]), false);
+    assert.equal(isMockttpRequestAbortLog([]), false);
   });
 
   it("does not match a real upstream failure on the same prefix", () => {
@@ -74,6 +91,7 @@ describe("mockttp abort-log filter", () => {
 
     const uninstall = installMockttpAbortFilter(fakeConsole);
     fakeConsole.error("Failed to handle request:", new Error("Aborted"));
+    fakeConsole.error(new Error("Aborted"));
     fakeConsole.error("Failed to handle request:", "getaddrinfo ENOTFOUND nope.invalid");
     fakeConsole.error("Shutting down…");
     uninstall();
@@ -88,6 +106,22 @@ describe("mockttp abort-log filter", () => {
         ["Failed to handle request:", "Error: Aborted"],
       ],
     );
+  });
+
+  it("re-wraps when something else replaced console.error after the install", () => {
+    const seen: unknown[][] = [];
+    const fakeConsole = { error: (...args: unknown[]) => { seen.push(args); } } as unknown as Console;
+
+    installMockttpAbortFilter(fakeConsole);
+    // A later owner of console.error (a test harness, another wrapper).
+    const replaced: unknown[][] = [];
+    fakeConsole.error = (...args: unknown[]) => { replaced.push(args); };
+    installMockttpAbortFilter(fakeConsole);
+
+    fakeConsole.error(new Error("Aborted"));
+    fakeConsole.error("kept");
+
+    assert.deepEqual(replaced.map((args) => args.map(String)), [["kept"]]);
   });
 
   it("installs at most once, so a proxy restart does not stack wrappers", () => {

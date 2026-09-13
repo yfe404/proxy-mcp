@@ -54,8 +54,24 @@ export function formatClientAbortLine(req: AbortedRequestLike): string {
   return `request aborted by client: ${req.method ?? "?"} ${req.url ?? "?"}`;
 }
 
-/** True when these console.error arguments are mockttp's abort noise. */
+/**
+ * True when these console.error arguments are mockttp's abort noise.
+ *
+ * mockttp prints a cancelled request in two shapes, both per request:
+ *   console.error("Failed to handle request:", "Aborted")
+ *     — the rule-handler catch in MockttpServer.handleRequest, reached when a
+ *       rule buffers the request body (a body transform, or beforeRequest).
+ *   console.error(new Error("Aborted"))
+ *     — `waitForCompletedRequest(...).catch(console.error)` in
+ *       announceCompletedRequestAsync / announceResponseAsync, reached for
+ *       every request once anything listens for the `request` event, which
+ *       ProxyManager always does. A bare Error prints with its full stack:
+ *       this is the flood #29 reported.
+ */
 export function isMockttpRequestAbortLog(args: unknown[]): boolean {
+  if (args.length === 1) {
+    return args[0] instanceof Error && isClientAbortError(args[0]);
+  }
   return args.length >= 2
     && args[0] === MOCKTTP_REQUEST_ERROR_PREFIX
     && isClientAbortError(args[1]);
@@ -82,14 +98,16 @@ export function logClientAbort(req: AbortedRequestLike, env: NodeJS.ProcessEnv =
 const installed = new WeakMap<Console, { original: Console["error"]; wrapper: Console["error"] }>();
 
 /**
- * Drop mockttp's per-request abort line from `console.error`.
+ * Drop mockttp's per-request abort logging from `console.error`.
  *
- * Idempotent: a second install on the same console is a no-op, so restarting
- * the proxy does not stack wrappers. Returns the uninstaller.
+ * Idempotent while the wrapper is still in place, so restarting the proxy does
+ * not stack wrappers. If something else replaced console.error since, this
+ * wraps that instead of returning a filter that is no longer installed.
+ * Returns the uninstaller.
  */
 export function installMockttpAbortFilter(target: Console = console): () => void {
   const existing = installed.get(target);
-  if (existing) return () => uninstall(target);
+  if (existing && target.error === existing.wrapper) return () => uninstall(target);
 
   const original = target.error;
   const wrapper = (...args: unknown[]): void => {

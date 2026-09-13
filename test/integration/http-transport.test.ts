@@ -58,8 +58,9 @@ describe("Streamable HTTP transport sessions", () => {
 
   it("closes only the ended session's McpServer and keeps the other answering", async (t) => {
     const closed: string[] = [];
+    const released: string[] = [];
     try {
-      handle = await startHttp(0, serverFactory(closed));
+      handle = await startHttp(0, serverFactory(closed), (sid) => { released.push(sid); });
     } catch (e: any) {
       if (e && (e.code === "EPERM" || e.code === "EACCES")) {
         t.skip("listen() not permitted in this environment");
@@ -73,7 +74,9 @@ describe("Streamable HTTP transport sessions", () => {
     const b = await connectClient(url);
 
     // Two distinct sessions, each answered by its own McpServer.
-    assert.notEqual(a.transport.sessionId, b.transport.sessionId);
+    // terminateSession() clears the client's copy, so keep A's id now.
+    const aSessionId = a.transport.sessionId!;
+    assert.notEqual(aSessionId, b.transport.sessionId);
     assert.equal(handle.sessions.size, 2);
     assert.equal(textOf(await a.client.callTool({ name: "whoami", arguments: {} })), "session-0");
     assert.equal(textOf(await b.client.callTool({ name: "whoami", arguments: {} })), "session-1");
@@ -86,7 +89,11 @@ describe("Streamable HTTP transport sessions", () => {
     await waitFor(() => closed.includes("session-0"), "session-0's McpServer was not closed");
     assert.deepEqual(closed, ["session-0"], "no other session's server may be closed");
     assert.equal(handle.sessions.size, 1);
-    assert.equal(handle.sessions.has(a.transport.sessionId!), false);
+    assert.equal(handle.sessions.has(aSessionId), false);
+
+    // What that session activated is released, so its browsers cannot outlive
+    // it owned by a session id no client can name again (#26).
+    assert.deepEqual(released, [aSessionId]);
 
     // Session B still answers on its own server.
     assert.equal(textOf(await b.client.callTool({ name: "whoami", arguments: {} })), "session-1");

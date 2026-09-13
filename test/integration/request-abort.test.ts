@@ -102,13 +102,12 @@ describe("client-aborted requests", () => {
       await waitFor(() => logged.includes(expected), () =>
         `expected ${JSON.stringify(expected)} in stderr, saw ${JSON.stringify(logged)}`);
 
-      // Exactly one line per cancelled request, and no stack on it.
-      assert.equal(logged.filter((l) => l === expected).length, 1);
-
-      // mockttp's per-request abort noise is gone.
+      // Exactly one line for the cancelled request, and nothing else about it:
+      // neither mockttp's `Failed to handle request: Aborted`, nor the bare
+      // Error('Aborted') its announce* handlers print with a full stack.
       assert.deepEqual(
-        logged.filter((l) => l.startsWith("Failed to handle request:") && l.includes("Aborted")),
-        [],
+        logged.filter((l) => l.includes("Aborted") || l.includes("aborted")),
+        [expected],
       );
     } finally {
       delete process.env.PROXY_MCP_DEBUG;

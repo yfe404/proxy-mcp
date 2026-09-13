@@ -29,6 +29,7 @@ import { registerSessionTools } from "./tools/sessions.js";
 import { registerHumanizerTools } from "./tools/humanizer.js";
 import { registerResources } from "./resources.js";
 import { initInterceptors } from "./interceptors/init.js";
+import { interceptorManager } from "./interceptors/manager.js";
 
 /* ------------------------------------------------------------------ */
 /*  CLI helpers                                                        */
@@ -90,7 +91,11 @@ async function main() {
     await startStdio();
   } else if (transport === "http") {
     const port = parseInt(arg("port", "3001"), 10);
-    const handle = await startHttp(port, createMcpServer);
+    // A session that ends without calling proxy_stop would otherwise leave its
+    // browsers and containers owned by a session id nothing can name again.
+    const handle = await startHttp(port, createMcpServer, async (sessionId) => {
+      await interceptorManager.deactivateOwnedBy(sessionId).catch(() => {});
+    });
     console.error(`Proxy MCP server (Streamable HTTP) listening on http://127.0.0.1:${handle.port}/mcp`);
     process.on("SIGINT", async () => {
       console.error("Shutting down…");

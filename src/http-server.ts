@@ -70,7 +70,8 @@ export class HttpSessionRegistry<
     const session = this.sessions.get(sessionId);
     if (!session) return false;
     this.sessions.delete(sessionId);
-    await session.server.close();
+    // This runs from transport.onclose, where a rejection would be unhandled.
+    try { await session.server.close(); } catch { /* already closed */ }
     return true;
   }
 
@@ -97,11 +98,14 @@ export interface HttpTransportHandle {
 /**
  * Start the Streamable HTTP transport on `port`.
  *
- * `createMcpServer` is called once per new MCP session.
+ * `createMcpServer` is called once per new MCP session. `onSessionClosed` is
+ * called with the session id after its server is closed, so the caller can
+ * release what that session owned; its rejections are swallowed.
  */
 export async function startHttp(
   port: number,
   createMcpServer: () => McpServer,
+  onSessionClosed?: (sessionId: string) => void | Promise<void>,
 ): Promise<HttpTransportHandle> {
   const sessions = new HttpSessionRegistry<StreamableHTTPServerTransport, McpServer>();
 
@@ -161,7 +165,12 @@ export async function startHttp(
       // transport leaked one server per past session (#26).
       transport.onclose = () => {
         const sid = transport.sessionId;
-        if (sid) void sessions.close(sid);
+        if (!sid) return;
+        void sessions.close(sid).then(async (closed) => {
+          // Targets are owned by a session id no client can name again, so a
+          // scoped proxy_stop could never reach them: release them here.
+          if (closed && onSessionClosed) await onSessionClosed(sid);
+        }).catch(() => { /* nothing left to do on a closing session */ });
       };
 
       await sessionServer.connect(transport);
