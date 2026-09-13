@@ -64,7 +64,7 @@ export function registerInterceptorTools(server: McpServer): void {
 
   server.tool(
     "interceptor_list",
-    "List all interceptors with their availability and active targets. Shows Browser, Terminal, Android ADB, Android Frida, and Docker interceptors.",
+    "List all interceptors with their availability and active targets. Shows the Browser, Terminal and Docker interceptors.",
     {},
     async () => {
       try {
@@ -112,7 +112,7 @@ export function registerInterceptorTools(server: McpServer): void {
 
   server.tool(
     "interceptor_deactivate_all",
-    "Kill ALL active interceptors across all types. Emergency cleanup — stops all browser instances, kills spawned processes, removes ADB tunnels, detaches Frida, cleans Docker.",
+    "Kill ALL active interceptors across all types. Emergency cleanup — stops all browser instances, kills spawned processes, cleans Docker.",
     {},
     async () => {
       try {
