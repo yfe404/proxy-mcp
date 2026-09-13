@@ -1,5 +1,80 @@
 # Changelog
 
+## 3.5.0 — 2026-09-13
+
+### Removed (breaking)
+
+The mobile capture stack, the Android/Frida device tooling and the Camoufox
+backend are gone. proxy-mcp is now an explicit HTTP/HTTPS MITM proxy with three
+interceptors: `terminal`, `browser` (cloakbrowser stealth Chromium) and
+`docker`.
+
+- Tools removed: `proxy_start_transparent`, `proxy_stop_transparent`,
+  `proxy_transparent_status`, `proxy_mobile_setup`, `proxy_mobile_teardown`,
+  `proxy_mobile_detect_iface`, `interceptor_android_devices`,
+  `interceptor_android_activate`, `interceptor_android_deactivate`,
+  `interceptor_android_setup`, `interceptor_frida_apps`,
+  `interceptor_frida_attach`, `interceptor_frida_detach`,
+  `interceptor_camoufox_launch`, `interceptor_camoufox_info`,
+  `interceptor_camoufox_list`, `interceptor_camoufox_close`. 72 tools remain.
+- Interceptors removed: `android-adb`, `android-frida`, `camoufox`.
+  `interceptor_list` now reports exactly `terminal`, `browser`, `docker`.
+- Resource removed: `proxy://camoufox/targets`.
+- `interceptor_browser_evaluate` loses its `world` argument. `world: "main"`
+  only ever did anything on Camoufox targets; the tool now always runs in
+  Playwright's isolated utility world. Use
+  `interceptor_browser_inject_init_script` for main-world patching.
+- The `frida-js` dependency and `src/frida-scripts/` are gone, so `npm run
+  build` is plain `tsc` again with nothing to copy into `dist/`.
+
+### Changed
+
+- **cloakbrowser 0.3.24 → 0.5.10.** Every `launchContext` option this repo
+  passes (`headless`, `proxy`, `args`, `humanize`, `humanPreset`, `timezone`,
+  `locale`, `viewport`) keeps its name and shape, so no call-site change was
+  needed. One upstream behaviour change reaches `interceptor_browser_launch`:
+  since 0.4.0 a headed launch with no explicit viewport gets `viewport: null`
+  (the page tracks the real window) instead of a forced 1920x947, and since
+  0.4.6 the same applies headless on browser builds newer than 148. Nothing in
+  proxy-mcp reads `page.viewportSize()`, and passing `viewport_width` +
+  `viewport_height` still pins a fixed viewport. cloakbrowser 0.4.0 also
+  dropped its `patchright` backend, which proxy-mcp never used.
+
+### Added
+
+- **`PROXY_MCP_UPSTREAM_IPV4_ONLY` (default on)** constrains upstream DNS
+  resolution for mockttp's passthrough and forward rules to A records, so the
+  proxy never opens an upstream connection over IPv6. Set it to `0` (also
+  `false`/`no`/`off`) to restore mockttp's own resolver.
+
+  Measured on the Apify platform (`node:22-bookworm-slim`, no IPv6 route in the
+  container), driving a cloakbrowser page at `https://www.alza.cz/` through the
+  proxy, same image, env var flipped between builds:
+
+  | | `ENETUNREACH` lines in the server log | IPv6 connect errors |
+  |---|---|---|
+  | `PROXY_MCP_UPSTREAM_IPV4_ONLY=0` | 6 | 2 |
+  | `PROXY_MCP_UPSTREAM_IPV4_ONLY=1` | 0 | 0 |
+
+  What the measurement also shows, and what this flag does **not** fix: every
+  one of those errors came from `brunhild.challenges.cloudflare.com`, a
+  Cloudflare challenge host that publishes AAAA records and no A record at all.
+  Node was not mis-ordering a dual-stack answer — there was no IPv4 address to
+  choose. That is why `--dns-result-order=ipv4first` changed nothing. With the
+  flag on, the same request fails as a single `getaddrinfo ENOTFOUND` line
+  instead of a Happy-Eyeballs `AggregateError [ENETUNREACH]` with a stack per
+  address; it does not start succeeding. The flag's real guarantee is narrower
+  and still worth having: a host that publishes both A and AAAA records is
+  always reached over IPv4, so it can never stall on an unroutable address.
+
+  mockttp 3.17's public `lookupOptions` carries only cacheable-lookup settings
+  and has no hook for supplying a lookup function, so `src/upstream-dns.ts`
+  seeds the memo cache behind mockttp's `getDnsLookupFunction` under a private
+  token object and passes that token as `lookupOptions`. If those internals
+  ever move, the flag logs a warning and falls back to mockttp's resolver
+  rather than changing behaviour silently. Successful answers are cached for
+  10s, matching the cache mockttp applies by default.
+
 ## 3.4.1 — 2026-09-13
 
 - **Browser targets survive across MCP sessions** (#25). The HTTP transport

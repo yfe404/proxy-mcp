@@ -269,8 +269,8 @@ JA4 hashes that identify the client's TLS stack."
    `proxy_get_tls_fingerprints` with `{"exchange_id": "<id>"}`
    — Show JA3 hash, JA4 hash, and JA3S server fingerprint
 
-**Say:** "Every TLS handshake is fingerprinted. Chrome, curl, Python, and mobile apps
-all produce distinct JA3 hashes. Anti-bot systems use these to detect automation.
+**Say:** "Every TLS handshake is fingerprinted. Chrome, curl, and Python all
+produce distinct JA3 hashes. Anti-bot systems use these to detect automation.
 The proxy can also replay matching HTTPS requests via CycleTLS with a spoofed JA3
 using the `proxy_set_ja3_spoof` tool. Note: this does not change the original
 client's TLS fingerprint (it's proxy-side)."
@@ -313,12 +313,10 @@ After cleanup, deliver this summary:
 - TLS fingerprint capture (JA3/JA4)
 
 **Also supported (not shown):**
-- Android interception (ADB cert injection + reverse tunnel)
-- Frida SSL unpinning (bypass cert pinning on any Android app)
 - Docker container interception
 - Upstream proxy chaining (SOCKS5/HTTP for geolocation)
 - JA3 fingerprint spoofing via CycleTLS
 - Request forwarding and connection dropping
 - Per-host proxy routing
 
-**Stats:** 71 tools, 6 resources, 3 resource templates, 5 interceptor types.
+**Stats:** 72 tools, 7 resources, 3 resource templates, 3 interceptor types.

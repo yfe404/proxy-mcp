@@ -1,16 +1,20 @@
 /**
  * IPv4-only upstream DNS resolution for mockttp's passthrough rules.
  *
- * Observed on the Apify platform: in a container that has no IPv6 route while
- * DNS still returns AAAA records, mockttp's passthrough opened upstream
- * connections to Cloudflare-fronted hosts over IPv6 and failed them with
- * `connect ENETUNREACH 2606:4700::…:443`, a handful of requests per page.
+ * Observed on the Apify platform: in a container that has no IPv6 route,
+ * mockttp's passthrough opened upstream connections over IPv6 and failed them
+ * with `connect ENETUNREACH 2606:4700::…:443`, a handful of requests per page.
  * `NODE_OPTIONS=--dns-result-order=ipv4first` on the server process did not
- * change it. Why the AAAA record wins is not established; what is established
- * is that mockttp resolves upstream hosts through the lookup function it gets
- * from `getDnsLookupFunction(lookupOptions)` and hands that function to
- * `http(s).request`, so constraining that function to A records removes the
- * IPv6 candidate entirely.
+ * change it.
+ *
+ * Measured cause (platform A/B, 2026-09-13): every one of those errors came
+ * from `brunhild.challenges.cloudflare.com`, a Cloudflare challenge host that
+ * publishes AAAA records and no A record. Node was not mis-ordering a
+ * dual-stack answer, so result order could not help — there was no IPv4
+ * address to pick. Constraining the resolver therefore does not make that host
+ * reachable; the request fails as `getaddrinfo ENOTFOUND` instead. What it
+ * does guarantee is that a host publishing both A and AAAA records is always
+ * reached over IPv4 and can never stall on an unroutable address.
  *
  * mockttp 3.17's public `lookupOptions` only carries cacheable-lookup settings
  * (`maxTtl`, `errorTtl`, `servers`) — it has no hook for supplying a lookup
@@ -24,8 +28,8 @@
  * Off switch: PROXY_MCP_UPSTREAM_IPV4_ONLY=0 (also false/no/off).
  *
  * Trade-off: with the flag on, a host that publishes only AAAA records becomes
- * unreachable through the proxy. That is the intended exchange on IPv4-only
- * infrastructure, and it is why the flag exists.
+ * unreachable through the proxy even where IPv6 works. That is the intended
+ * exchange on IPv4-only infrastructure, and it is why the flag exists.
  */
 
 import dns from "node:dns";
