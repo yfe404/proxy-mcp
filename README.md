@@ -97,17 +97,6 @@ node dist/index.js --transport http --port 3001
 proxy password out of the transcript — see
 [Keeping the upstream password out of the transcript](#keeping-the-upstream-password-out-of-the-transcript).
 
-`PROXY_MCP_UPSTREAM_IPV4_ONLY` (default on) resolves upstream hosts to A
-records only, so the proxy never opens an upstream connection over IPv6. On a
-host with no IPv6 route — an Apify Actor container, for instance — that stops
-requests to dual-stack hosts from stalling on an unroutable AAAA address. It
-does not make an AAAA-only host reachable: such a request fails as
-`getaddrinfo ENOTFOUND` instead of `connect ENETUNREACH`. Set the variable to
-`0` (or `false`/`no`/`off`) to restore mockttp's own resolver. It applies to
-every request the proxy forwards itself, but not to requests answered through
-JA3 spoofing (`proxy_set_ja3_spoof`) — impit resolves those itself and takes no
-address-family option.
-
 ### Manual MCP configuration
 
 The configured server alias controls Claude's generated tool prefix. The examples below use `proxy-mcp`, so Claude Code exposes tools as `mcp__proxy-mcp__<tool_name>`. If you rename the server key to `proxy`, use `mcp__proxy__<tool_name>` instead.

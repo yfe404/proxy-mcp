@@ -24,6 +24,12 @@ interceptors: `terminal`, `browser` (cloakbrowser stealth Chromium) and
   only ever did anything on Camoufox targets; the tool now always runs in
   Playwright's isolated utility world. Use
   `interceptor_browser_inject_init_script` for main-world patching.
+- Transparent proxying is removed as a feature, not just as a tool file:
+  `ProxyManager.startTransparent`/`stopTransparent`/`getTransparentStatus` and
+  the second mockttp listener are gone, `proxy_status` no longer reports a
+  `transparentProxy` block, and `proxy_list_traffic` loses its `source_filter`
+  argument and the `source` field on each entry (every exchange came from the
+  explicit listener once the transparent one was gone).
 - The `frida-js` dependency and `src/frida-scripts/` are gone, so `npm run
   build` is plain `tsc` again with nothing to copy into `dist/`.
 
@@ -40,46 +46,28 @@ interceptors: `terminal`, `browser` (cloakbrowser stealth Chromium) and
   `viewport_height` still pins a fixed viewport. cloakbrowser 0.4.0 also
   dropped its `patchright` backend, which proxy-mcp never used.
 
-### Added
+### Known behaviour
 
-- **`PROXY_MCP_UPSTREAM_IPV4_ONLY` (default on)** constrains upstream DNS
-  resolution for mockttp's passthrough and forward rules to A records, so the
-  proxy never opens an upstream connection over IPv6. Set it to `0` (also
-  `false`/`no`/`off`) to restore mockttp's own resolver.
+- **An IPv6-only host is unreachable from a container with no IPv6 route, and
+  no proxy-side setting changes that.** Measured on the Apify platform
+  (`node:22-bookworm-slim`) while driving a cloakbrowser page at
+  `https://www.alza.cz/` through the proxy: mockttp's passthrough failed a
+  handful of upstream connections per page with
+  `connect ENETUNREACH 2606:4700::…:443`, and
+  `NODE_OPTIONS=--dns-result-order=ipv4first` changed nothing.
 
-  Measured on the Apify platform (`node:22-bookworm-slim`, no IPv6 route in the
-  container), driving a cloakbrowser page at `https://www.alza.cz/` through the
-  proxy, same image, env var flipped between builds:
-
-  | | `ENETUNREACH` lines in the server log | IPv6 connect errors |
-  |---|---|---|
-  | `PROXY_MCP_UPSTREAM_IPV4_ONLY=0` | 6 | 2 |
-  | `PROXY_MCP_UPSTREAM_IPV4_ONLY=1` | 0 | 0 |
-
-  What the measurement also shows, and what this flag does **not** fix: every
-  one of those errors came from `brunhild.challenges.cloudflare.com`, a
-  Cloudflare challenge host that publishes AAAA records and no A record at all.
+  Every one of those errors came from `brunhild.challenges.cloudflare.com`, a
+  Cloudflare challenge asset that publishes AAAA records and **no A record**.
   Node was not mis-ordering a dual-stack answer — there was no IPv4 address to
-  choose. That is why `--dns-result-order=ipv4first` changed nothing. With the
-  flag on, the same request fails as a single `getaddrinfo ENOTFOUND` line
-  instead of a Happy-Eyeballs `AggregateError [ENETUNREACH]` with a stack per
-  address; it does not start succeeding. The flag's real guarantee is narrower
-  and still worth having: a host that publishes both A and AAAA records is
-  always reached over IPv4, so it can never stall on an unroutable address.
+  choose, which is why result order was irrelevant. Forcing the upstream
+  resolver to A records only was prototyped and measured: it takes the
+  `ENETUNREACH` count from 6 to 0, but only by turning the same failed request
+  into a `getaddrinfo ENOTFOUND`. It does not make the asset load, so it was
+  not shipped. Requests to dual-stack hosts were never affected — they already
+  fall back to IPv4 through Happy Eyeballs.
 
-  Scope: the flag covers every request mockttp forwards itself — the default
-  passthrough and every user rule's passthrough/forward. It does **not** cover
-  the JA3-spoof path: when `proxy_set_ja3_spoof` matches a host the response
-  comes from impit, which resolves DNS inside its own Rust client and exposes
-  no address-family option, so those requests can still pick an AAAA record.
-
-  mockttp 3.17's public `lookupOptions` carries only cacheable-lookup settings
-  and has no hook for supplying a lookup function, so `src/upstream-dns.ts`
-  seeds the memo cache behind mockttp's `getDnsLookupFunction` under a private
-  token object and passes that token as `lookupOptions`. If those internals
-  ever move, the flag logs a warning and falls back to mockttp's resolver
-  rather than changing behaviour silently. Successful answers are cached for
-  10s, matching the cache mockttp applies by default.
+  If you need those assets, give the container an IPv6 route or an upstream
+  proxy that has one.
 
 ## 3.4.1 — 2026-09-13
 
