@@ -54,7 +54,7 @@ describe("MCP Server Integration", () => {
     if (cleanup) await cleanup();
   });
 
-  it("lists all 74 tools", async () => {
+  it("lists all 67 tools", async () => {
     const { client, cleanup: c } = await createTestSetup();
     cleanup = c;
 
@@ -85,9 +85,25 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("interceptor_browser_navigate"));
     assert.ok(names.includes("interceptor_browser_close"));
     assert.ok(names.includes("interceptor_spawn"));
-    assert.ok(names.includes("interceptor_android_devices"));
-    assert.ok(names.includes("interceptor_frida_apps"));
     assert.ok(names.includes("interceptor_docker_attach"));
+    // Removed in v3.5.0 — mobile/device tooling and camoufox.
+    for (const gone of [
+      "interceptor_android_devices",
+      "interceptor_android_activate",
+      "interceptor_android_deactivate",
+      "interceptor_android_setup",
+      "interceptor_frida_apps",
+      "interceptor_frida_attach",
+      "interceptor_frida_detach",
+      "interceptor_camoufox_launch",
+      "interceptor_camoufox_close",
+      "proxy_start_transparent",
+      "proxy_stop_transparent",
+      "proxy_mobile_setup",
+      "proxy_mobile_teardown",
+    ]) {
+      assert.ok(!names.includes(gone), `${gone} should no longer be registered`);
+    }
     // Browser DevTools-equivalent tools (Playwright-driven)
     assert.ok(names.includes("interceptor_browser_snapshot"));
     assert.ok(names.includes("interceptor_browser_screenshot"));
@@ -120,7 +136,7 @@ describe("MCP Server Integration", () => {
     assert.ok(names.includes("proxy_list_fingerprint_presets"));
     assert.ok(names.includes("proxy_check_fingerprint_runtime"));
     assert.ok(names.includes("proxy_search_session_bodies"));
-    assert.equal(names.length, 74);
+    assert.equal(names.length, 67);
   });
 
   it("start/status/stop lifecycle via MCP", async (t) => {

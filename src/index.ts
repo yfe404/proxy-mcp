@@ -29,9 +29,6 @@ import { registerInterceptorTools } from "./tools/interceptors.js";
 import { registerDevToolsTools } from "./tools/devtools.js";
 import { registerSessionTools } from "./tools/sessions.js";
 import { registerHumanizerTools } from "./tools/humanizer.js";
-import { registerTransparentTools } from "./tools/transparent.js";
-import { registerMobileTools } from "./tools/mobile.js";
-import { registerCamoufoxTools } from "./tools/camoufox.js";
 import { registerResources } from "./resources.js";
 import { initInterceptors } from "./interceptors/init.js";
 
@@ -55,7 +52,7 @@ function arg(name: string, fallback: string): string {
 /* ------------------------------------------------------------------ */
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "proxy", version: "3.4.1" });
+  const server = new McpServer({ name: "proxy", version: "3.5.0" });
 
   initInterceptors();
 
@@ -69,9 +66,6 @@ function createMcpServer(): McpServer {
   registerDevToolsTools(server);
   registerSessionTools(server);
   registerHumanizerTools(server);
-  registerTransparentTools(server);
-  registerMobileTools(server);
-  registerCamoufoxTools(server);
   registerResources(server);
 
   return server;

@@ -11,6 +11,8 @@
 
 import type * as mockttp from "mockttp";
 import type { CompletedRequest, CompletedResponse, ProxyConfig } from "mockttp";
+import type { PassThroughLookupOptions } from "mockttp/dist/rules/passthrough-handling-definitions";
+import { upstreamLookupOptions } from "./upstream-dns.js";
 import { randomUUID } from "node:crypto";
 import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
 import { serializeHeaders, capString, redactProxyUrl } from "./utils.js";
@@ -1129,13 +1131,14 @@ export class ProxyManager {
     // Rules are registered in order — mockttp uses registration order for matching
     // when asPriority() is not used (asPriority has bugs with HTTPS mode).
     const proxyConfig = this.resolveProxyConfig();
+    const lookupOptions = await upstreamLookupOptions();
     const enabledRules = [...this.rules.values()]
       .filter((r) => r.enabled)
       .sort((a, b) => a.priority - b.priority);
 
     for (const rule of enabledRules) {
       const builder = this.buildMatcher(server, rule.matcher).always();
-      await this.buildHandler(builder, rule, proxyConfig);
+      await this.buildHandler(builder, rule, proxyConfig, lookupOptions);
     }
 
     // Default passthrough (registered last = lowest priority)
@@ -1145,6 +1148,7 @@ export class ProxyManager {
         .thenPassThrough({
           ignoreHostHttpsErrors: true,
           proxyConfig,
+          lookupOptions,
           beforeRequest: async (req) => {
             // Only spoof HTTPS requests matching host patterns
             if (!req.url.startsWith("https://")) return {};
@@ -1246,6 +1250,7 @@ export class ProxyManager {
         .thenPassThrough({
           ignoreHostHttpsErrors: true,
           proxyConfig,
+          lookupOptions,
         });
     }
 
@@ -1302,21 +1307,22 @@ export class ProxyManager {
 
     // Apply the same rules as the explicit proxy
     const proxyConfig = this.resolveProxyConfig();
+    const lookupOptions = await upstreamLookupOptions();
     const enabledRules = [...this.rules.values()]
       .filter((r) => r.enabled)
       .sort((a, b) => a.priority - b.priority);
 
     for (const rule of enabledRules) {
       const builder = this.buildMatcher(server, rule.matcher).always();
-      await this.buildHandler(builder, rule, proxyConfig);
+      await this.buildHandler(builder, rule, proxyConfig, lookupOptions);
     }
 
     // Default passthrough — same logic as explicit proxy but no JA3 spoofing
-    // (transparent traffic is from mobile devices, not browsers needing spoof)
     await server.forAnyRequest().always()
       .thenPassThrough({
         ignoreHostHttpsErrors: true,
         proxyConfig,
+        lookupOptions,
       });
 
     await server.start(this.transparentPort || 0);
@@ -1729,6 +1735,7 @@ export class ProxyManager {
     builder: mockttp.RequestRuleBuilder,
     rule: InterceptionRule,
     proxyConfig: ProxyConfig,
+    lookupOptions: PassThroughLookupOptions | undefined,
   ): Promise<void> {
     const handler = rule.handler;
 
@@ -1745,6 +1752,7 @@ export class ProxyManager {
         await builder.thenForwardTo(handler.forwardTo!, {
           ignoreHostHttpsErrors: true,
           proxyConfig,
+          lookupOptions,
           transformRequest: handler.transformRequest ? {
             updateHeaders: nullsToUndefined(handler.transformRequest.updateHeaders),
             replaceMethod: handler.transformRequest.replaceMethod,
@@ -1767,6 +1775,7 @@ export class ProxyManager {
         await builder.thenPassThrough({
           ignoreHostHttpsErrors: true,
           proxyConfig,
+          lookupOptions,
           transformRequest: handler.transformRequest ? {
             updateHeaders: nullsToUndefined(handler.transformRequest.updateHeaders),
             replaceMethod: handler.transformRequest.replaceMethod,

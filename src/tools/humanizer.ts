@@ -2,8 +2,8 @@
  * Humanizer MCP tools — thin wrappers over backend Playwright pages.
  *
  * cloakbrowser targets may apply cloakbrowser's own humanize patches when
- * launched with humanize enabled. Camoufox targets follow Camoufox's launch
- * config. proxy-mcp itself calls Playwright primitives and tracks mouse
+ * launched with humanize enabled. proxy-mcp itself calls Playwright
+ * primitives and tracks mouse
  * position for idle jitter.
  */
 
@@ -24,7 +24,7 @@ export function registerHumanizerTools(server: McpServer): void {
     "humanizer_move",
     "Move mouse to target coordinates via the backend Playwright page.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       x: z.number().describe("Destination X coordinate"),
       y: z.number().describe("Destination Y coordinate"),
     },
@@ -56,7 +56,7 @@ export function registerHumanizerTools(server: McpServer): void {
     "Click an element. Pass one of: selector (CSS/XPath), role + optional name, " +
     "text, label, or raw x+y coords as fallback. Locator-based calls auto-wait for visible.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       selector: z.string().optional().describe("CSS or XPath selector (e.g. 'button.submit', '//button[@id=\"go\"]')"),
       role: z.string().optional().describe("ARIA role (e.g. 'button', 'link', 'textbox')"),
       name: z.string().optional().describe("Accessible name; used with role (e.g. 'Sign in')"),
@@ -112,7 +112,7 @@ export function registerHumanizerTools(server: McpServer): void {
     "humanizer_type",
     "Type text into the focused element via page.keyboard.type.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       text: z.string().describe("Text to type"),
       delay_ms: z.number().optional()
         .describe("Optional Playwright delay per character in ms."),
@@ -148,7 +148,7 @@ export function registerHumanizerTools(server: McpServer): void {
     "humanizer_scroll",
     "Dispatch a wheel event. Raw page.mouse.wheel — single event, not multi-step.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       delta_y: z.number().describe("Vertical scroll delta in pixels (positive = scroll down)"),
       delta_x: z.number().optional().default(0)
         .describe("Horizontal scroll delta in pixels (default: 0)"),
@@ -181,7 +181,7 @@ export function registerHumanizerTools(server: McpServer): void {
     "Simulate idle behavior with mouse micro-jitter and occasional micro-scrolls. " +
     "Keeps the page 'alive' to avoid idle detection by bot-detection scripts.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       duration_ms: z.number().describe("How long to simulate idle behavior in ms"),
       intensity: z.enum(["subtle", "normal"]).optional().default("subtle")
         .describe("Idle intensity: 'subtle' (±3px jitter) or 'normal' (±8px jitter, more scrolls)"),
