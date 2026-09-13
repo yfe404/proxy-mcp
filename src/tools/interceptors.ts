@@ -1,12 +1,10 @@
 /**
- * Interceptor tools — MCP tools for auto-attaching to Browser, Android, Docker, and processes.
+ * Interceptor tools — MCP tools for auto-attaching to Browser, Docker, and processes.
  *
- * Organized into 6 groups:
+ * Organized into 4 groups:
  *   Discovery (3): list, status, deactivate_all
  *   Browser (3): launch, navigate, close
  *   Terminal (2): spawn, kill
- *   Android ADB (4): devices, setup, activate, deactivate
- *   Android Frida (3): apps, attach, detach
  *   Docker (2): attach, detach
  */
 
@@ -15,8 +13,6 @@ import { z } from "zod";
 import { proxyManager } from "../state.js";
 import { interceptorManager } from "../interceptors/manager.js";
 import type { TerminalInterceptor } from "../interceptors/terminal.js";
-import type { AndroidAdbInterceptor } from "../interceptors/android-adb.js";
-import type { AndroidFridaInterceptor } from "../interceptors/android-frida.js";
 import { getPageForTarget } from "../browser/session.js";
 import { truncateResult } from "../utils.js";
 
@@ -68,7 +64,7 @@ export function registerInterceptorTools(server: McpServer): void {
 
   server.tool(
     "interceptor_list",
-    "List all interceptors with their availability and active targets. Shows Browser, Terminal, Android ADB, Android Frida, and Docker interceptors.",
+    "List all interceptors with their availability and active targets. Shows the Browser, Terminal and Docker interceptors.",
     {},
     async () => {
       try {
@@ -93,7 +89,7 @@ export function registerInterceptorTools(server: McpServer): void {
     "interceptor_status",
     "Get detailed status of a specific interceptor, including all active targets and their details.",
     {
-      interceptor_id: z.string().describe("Interceptor ID (e.g., 'browser', 'terminal', 'android-adb', 'android-frida', 'docker')"),
+      interceptor_id: z.string().describe("Interceptor ID (e.g., 'browser', 'terminal', 'docker')"),
     },
     async ({ interceptor_id }) => {
       try {
@@ -116,7 +112,7 @@ export function registerInterceptorTools(server: McpServer): void {
 
   server.tool(
     "interceptor_deactivate_all",
-    "Kill ALL active interceptors across all types. Emergency cleanup — stops all browser instances, kills spawned processes, removes ADB tunnels, detaches Frida, cleans Docker.",
+    "Kill ALL active interceptors across all types. Emergency cleanup — stops all browser instances, kills spawned processes, cleans Docker.",
     {},
     async () => {
       try {
@@ -184,7 +180,7 @@ export function registerInterceptorTools(server: McpServer): void {
     "interceptor_browser_navigate",
     "Navigate the browser target's page via Playwright and optionally wait for matching host traffic to be captured by the proxy.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       url: z.string().describe("Destination URL"),
       wait_until: z.enum(["load", "domcontentloaded", "networkidle", "commit"]).optional().default("domcontentloaded")
         .describe("Playwright wait condition (default: domcontentloaded)"),
@@ -267,16 +263,13 @@ export function registerInterceptorTools(server: McpServer): void {
 
   server.tool(
     "interceptor_browser_close",
-    "Close a browser instance launched by interceptor_browser_launch (or interceptor_camoufox_launch).",
+    "Close a browser instance launched by interceptor_browser_launch.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
     },
     async ({ target_id }) => {
       try {
-        const interceptorId = typeof target_id === "string" && target_id.startsWith("camoufox_")
-          ? "camoufox"
-          : "browser";
-        await interceptorManager.deactivate(interceptorId, target_id);
+        await interceptorManager.deactivate("browser", target_id);
         return {
           content: [{
             type: "text",
@@ -348,203 +341,6 @@ export function registerInterceptorTools(server: McpServer): void {
                 exitCode: output.exitCode,
               } : null,
             }),
-          }],
-        };
-      } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
-      }
-    },
-  );
-
-  // ──────────────────────────────────────────
-  // Android ADB (4 tools)
-  // ──────────────────────────────────────────
-
-  server.tool(
-    "interceptor_android_devices",
-    "List connected Android devices via ADB with model, version, root status, and whether they're actively intercepted.",
-    {},
-    async () => {
-      try {
-        const adb = interceptorManager.get("android-adb") as AndroidAdbInterceptor | undefined;
-        if (!adb) {
-          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "Android ADB interceptor not registered." }) }] };
-        }
-        const activable = await adb.isActivable();
-        if (!activable) {
-          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "ADB not found. Install Android platform-tools." }) }] };
-        }
-        const devices = await adb.listDevices();
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ status: "success", devices }),
-          }],
-        };
-      } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
-      }
-    },
-  );
-
-  server.tool(
-    "interceptor_android_activate",
-    "Full Android interception: inject CA cert into system store (root required), set up ADB reverse tunnel, and optionally set Wi-Fi proxy. Proxy must be running.",
-    {
-      serial: z.string().describe("ADB device serial (from interceptor_android_devices)"),
-      inject_cert: z.boolean().optional().default(true).describe("Push CA cert to system store (requires root)"),
-      setup_tunnel: z.boolean().optional().default(true).describe("Set up ADB reverse tunnel"),
-      set_wifi_proxy: z.boolean().optional().default(false).describe("Set global Wi-Fi HTTP proxy via adb settings"),
-    },
-    async ({ serial, inject_cert, setup_tunnel, set_wifi_proxy }) => {
-      try {
-        const proxyInfo = requireProxy();
-        const result = await interceptorManager.activate("android-adb", {
-          ...proxyInfo,
-          serial,
-          injectCert: inject_cert,
-          setupTunnel: setup_tunnel,
-          setWifiProxy: set_wifi_proxy,
-        });
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ status: "success", ...result }),
-          }],
-        };
-      } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
-      }
-    },
-  );
-
-  server.tool(
-    "interceptor_android_deactivate",
-    "Remove ADB reverse tunnel and clear Wi-Fi proxy on an Android device.",
-    {
-      target_id: z.string().describe("Target ID from interceptor_android_activate"),
-    },
-    async ({ target_id }) => {
-      try {
-        await interceptorManager.deactivate("android-adb", target_id);
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ status: "success", message: `Android device ${target_id} deactivated.` }),
-          }],
-        };
-      } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
-      }
-    },
-  );
-
-  server.tool(
-    "interceptor_android_setup",
-    "Quick setup: push CA cert + ADB reverse tunnel only (no Wi-Fi proxy). Equivalent to interceptor_android_activate with set_wifi_proxy=false.",
-    {
-      serial: z.string().describe("ADB device serial"),
-    },
-    async ({ serial }) => {
-      try {
-        const proxyInfo = requireProxy();
-        const result = await interceptorManager.activate("android-adb", {
-          ...proxyInfo,
-          serial,
-          injectCert: true,
-          setupTunnel: true,
-          setWifiProxy: false,
-        });
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ status: "success", ...result }),
-          }],
-        };
-      } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
-      }
-    },
-  );
-
-  // ──────────────────────────────────────────
-  // Android Frida (3 tools)
-  // ──────────────────────────────────────────
-
-  server.tool(
-    "interceptor_frida_apps",
-    "List running apps on an Android device via Frida. Requires frida-server running on the device.",
-    {
-      serial: z.string().describe("ADB device serial"),
-    },
-    async ({ serial }) => {
-      try {
-        const frida = interceptorManager.get("android-frida") as AndroidFridaInterceptor | undefined;
-        if (!frida) {
-          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "Android Frida interceptor not registered." }) }] };
-        }
-        const activable = await frida.isActivable();
-        if (!activable) {
-          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "frida-js not installed or ADB not found." }) }] };
-        }
-        const apps = await frida.listApps(serial);
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ status: "success", apps }),
-          }],
-        };
-      } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
-      }
-    },
-  );
-
-  server.tool(
-    "interceptor_frida_attach",
-    "Attach to an Android app via Frida and inject SSL unpinning + proxy redirect scripts. Bypasses certificate pinning, OkHttp CertificatePinner, TrustManager, and native TLS verification.",
-    {
-      serial: z.string().describe("ADB device serial"),
-      app_name: z.string().optional().describe("App process name or package identifier"),
-      pid: z.number().optional().describe("Process ID to attach to (alternative to app_name)"),
-    },
-    async ({ serial, app_name, pid }) => {
-      try {
-        if (!app_name && pid === undefined) {
-          return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: "Either app_name or pid is required." }) }] };
-        }
-        const proxyInfo = requireProxy();
-        const result = await interceptorManager.activate("android-frida", {
-          ...proxyInfo,
-          serial,
-          appName: app_name,
-          pid,
-        });
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ status: "success", ...result }),
-          }],
-        };
-      } catch (e) {
-        return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: errorToString(e) }) }] };
-      }
-    },
-  );
-
-  server.tool(
-    "interceptor_frida_detach",
-    "Detach Frida session from an Android app, removing injected scripts.",
-    {
-      target_id: z.string().describe("Target ID from interceptor_frida_attach"),
-    },
-    async ({ target_id }) => {
-      try {
-        await interceptorManager.deactivate("android-frida", target_id);
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ status: "success", message: `Frida session ${target_id} detached.` }),
           }],
         };
       } catch (e) {

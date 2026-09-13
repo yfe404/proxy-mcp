@@ -4,8 +4,8 @@
  *   - interceptor_browser_inject_init_script
  *   - interceptor_browser_add_script_tag
  *
- * Drives both backends end-to-end through the MCP server with an in-memory
- * transport. Auto-skips when the corresponding backend is unavailable.
+ * Drives cloakbrowser end-to-end through the MCP server with an in-memory
+ * transport. Auto-skips when cloakbrowser is unavailable.
  *
  * Uses `data:` URLs to avoid network requirements; navigation goes through
  * `interceptor_browser_navigate` with `wait_for_proxy_capture: false`
@@ -14,7 +14,6 @@
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +29,6 @@ import { registerUpstreamTools } from "../../src/tools/upstream.js";
 import { registerModificationTools } from "../../src/tools/modification.js";
 import { registerTlsTools } from "../../src/tools/tls.js";
 import { registerInterceptorTools } from "../../src/tools/interceptors.js";
-import { registerCamoufoxTools } from "../../src/tools/camoufox.js";
 import { registerDevToolsTools } from "../../src/tools/devtools.js";
 import { registerSessionTools } from "../../src/tools/sessions.js";
 import { registerResources } from "../../src/resources.js";
@@ -52,15 +50,6 @@ async function cloakbrowserAvailable(): Promise<boolean> {
   }
 }
 
-function camoufoxAvailable(): boolean {
-  try {
-    const r = spawnSync("python3", ["-c", "import camoufox"], { stdio: "ignore" });
-    return r.status === 0;
-  } catch {
-    return false;
-  }
-}
-
 async function setupMcp(): Promise<{ client: Client; cleanup: () => Promise<void> }> {
   const server = new McpServer({ name: "js-inject-test", version: "1.0.0" });
   initInterceptors();
@@ -71,7 +60,6 @@ async function setupMcp(): Promise<{ client: Client; cleanup: () => Promise<void
   registerModificationTools(server);
   registerTlsTools(server);
   registerInterceptorTools(server);
-  registerCamoufoxTools(server);
   registerDevToolsTools(server);
   registerSessionTools(server);
   registerResources(server);
@@ -160,7 +148,6 @@ describe("Browser JS inject tools — cloakbrowser", {
       }) as { content: Array<{ text: string }> },
     );
     assert.equal(r.status, "success", JSON.stringify(r));
-    assert.equal(r.backend, "cloakbrowser");
     assert.equal(r.world, "isolated");
     const parsed = JSON.parse(r.value as string) as { title: string; n: number };
     assert.equal(parsed.title, "probe");
@@ -176,19 +163,6 @@ describe("Browser JS inject tools — cloakbrowser", {
     );
     assert.equal(r.status, "error");
     assert.match(String(r.error), /absolute/);
-  });
-
-  it("evaluate world='main' on cloakbrowser returns a helpful error", { timeout: SUITE_TIMEOUT }, async () => {
-    const s = await makeScript("return 1;");
-    scripts.push(s);
-    const r = parseToolResult(
-      await client.callTool({
-        name: "interceptor_browser_evaluate",
-        arguments: { target_id: targetId, script_path: s.path, world: "main" },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(r.status, "error");
-    assert.match(String(r.error), /camoufox/i);
   });
 
   it("inject_init_script patches survive across navigations (visible to subsequent evaluate)", { timeout: SUITE_TIMEOUT }, async () => {
@@ -241,161 +215,5 @@ describe("Browser JS inject tools — cloakbrowser", {
     const parsed = JSON.parse(r.value as string) as { sig: string; scripts: number };
     assert.equal(parsed.sig, "set-by-tag");
     assert.ok(parsed.scripts >= 1);
-  });
-});
-
-// ── Camoufox ──────────────────────────────────────────────────────
-
-describe("Browser JS inject tools — camoufox (main_world_eval ON)", {
-  skip: !camoufoxAvailable() ? "camoufox not installed (pip install cloverlabs-camoufox[geoip] && python3 -m camoufox fetch official/150.0.2-alpha.26)" : false,
-}, () => {
-  let client: Client;
-  let cleanup: () => Promise<void>;
-  let targetId: string;
-  const scripts: ScriptFile[] = [];
-
-  before(async () => {
-    ({ client, cleanup } = await setupMcp());
-    const launchRes = parseToolResult(
-      await client.callTool({
-        name: "interceptor_camoufox_launch",
-        arguments: { headless: true, humanize: false, geoip: false, main_world_eval: true, trust_proxy_cert: false },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(launchRes.status, "success", `camoufox launch failed: ${JSON.stringify(launchRes)}`);
-    targetId = launchRes.targetId as string;
-    await navigateToProbe(client, targetId);
-  });
-
-  after(async () => {
-    for (const s of scripts) await s.cleanup();
-    try { await client.callTool({ name: "interceptor_camoufox_close", arguments: { target_id: targetId } }); } catch { /* */ }
-    await cleanup();
-  });
-
-  it("evaluate isolated returns JSON + args", { timeout: SUITE_TIMEOUT }, async () => {
-    const s = await makeScript("return { title: document.title, n: __args.n + 1 };");
-    scripts.push(s);
-    const r = parseToolResult(
-      await client.callTool({
-        name: "interceptor_browser_evaluate",
-        arguments: { target_id: targetId, script_path: s.path, args: { n: 41 } },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(r.status, "success", JSON.stringify(r));
-    assert.equal(r.backend, "camoufox");
-    assert.equal(r.world, "isolated");
-    const parsed = JSON.parse(r.value as string) as { title: string; n: number };
-    assert.equal(parsed.title, "probe");
-    assert.equal(parsed.n, 42);
-  });
-
-  it("evaluate world='main' (mw:) sets a global readable by another main-world eval", { timeout: SUITE_TIMEOUT }, async () => {
-    const setter = await makeScript("window.__mw_signal = 'set-by-mw'; return window.__mw_signal;");
-    scripts.push(setter);
-    const r1 = parseToolResult(
-      await client.callTool({
-        name: "interceptor_browser_evaluate",
-        arguments: { target_id: targetId, script_path: setter.path, world: "main" },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(r1.status, "success", JSON.stringify(r1));
-    assert.equal(r1.world, "main");
-    assert.equal(JSON.parse(r1.value as string), "set-by-mw");
-
-    const reader = await makeScript("return window.__mw_signal;");
-    scripts.push(reader);
-    const r2 = parseToolResult(
-      await client.callTool({
-        name: "interceptor_browser_evaluate",
-        arguments: { target_id: targetId, script_path: reader.path, world: "main" },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(r2.status, "success", JSON.stringify(r2));
-    assert.equal(JSON.parse(r2.value as string), "set-by-mw");
-  });
-
-  it("on cloverlabs/FF150 both worlds share one realm (no Juggler-scope isolation)", { timeout: SUITE_TIMEOUT }, async () => {
-    // The previous test set window.__mw_signal via world:"main". On
-    // cloverlabs camoufox 0.6+ / Firefox 150 there is no separate isolated
-    // world — both args run in the page's main world. A default-world read
-    // sees the global. If isolation were ever re-introduced, this test
-    // would fail and alert us to update the docs / tool descriptions.
-    // Re-verify with: npx tsx scripts/camoufox-world-probe.ts
-    const probe = await makeScript("return window.__mw_signal;");
-    scripts.push(probe);
-    const r = parseToolResult(
-      await client.callTool({
-        name: "interceptor_browser_evaluate",
-        arguments: { target_id: targetId, script_path: probe.path },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(r.status, "success", JSON.stringify(r));
-    assert.equal(JSON.parse(r.value as string), "set-by-mw",
-      "cloverlabs/FF150 has no isolated world; default eval should see mw:-set globals. See scripts/camoufox-world-probe.ts.");
-  });
-
-  it("add_script_tag adds a DOM node visible via document.scripts", { timeout: SUITE_TIMEOUT }, async () => {
-    const tag = await makeScript("/* no-op */");
-    scripts.push(tag);
-    const tagRes = parseToolResult(
-      await client.callTool({
-        name: "interceptor_browser_add_script_tag",
-        arguments: { target_id: targetId, script_path: tag.path },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(tagRes.status, "success", JSON.stringify(tagRes));
-
-    const probe = await makeScript("return document.scripts.length;");
-    scripts.push(probe);
-    const r = parseToolResult(
-      await client.callTool({
-        name: "interceptor_browser_evaluate",
-        arguments: { target_id: targetId, script_path: probe.path },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(r.status, "success", JSON.stringify(r));
-    assert.ok(Number(JSON.parse(r.value as string)) >= 1);
-  });
-});
-
-describe("Browser JS inject tools — camoufox (main_world_eval OFF)", {
-  skip: !camoufoxAvailable() ? "camoufox not installed" : false,
-}, () => {
-  let client: Client;
-  let cleanup: () => Promise<void>;
-  let targetId: string;
-  const scripts: ScriptFile[] = [];
-
-  before(async () => {
-    ({ client, cleanup } = await setupMcp());
-    const launchRes = parseToolResult(
-      await client.callTool({
-        name: "interceptor_camoufox_launch",
-        arguments: { headless: true, humanize: false, geoip: false, trust_proxy_cert: false },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(launchRes.status, "success", `camoufox launch failed: ${JSON.stringify(launchRes)}`);
-    targetId = launchRes.targetId as string;
-    await navigateToProbe(client, targetId);
-  });
-
-  after(async () => {
-    for (const s of scripts) await s.cleanup();
-    try { await client.callTool({ name: "interceptor_camoufox_close", arguments: { target_id: targetId } }); } catch { /* */ }
-    await cleanup();
-  });
-
-  it("evaluate world='main' returns a helpful error when main_world_eval was not enabled at launch", { timeout: SUITE_TIMEOUT }, async () => {
-    const s = await makeScript("return 1;");
-    scripts.push(s);
-    const r = parseToolResult(
-      await client.callTool({
-        name: "interceptor_browser_evaluate",
-        arguments: { target_id: targetId, script_path: s.path, world: "main" },
-      }) as { content: Array<{ text: string }> },
-    );
-    assert.equal(r.status, "error");
-    assert.match(String(r.error), /main_world_eval/);
   });
 });

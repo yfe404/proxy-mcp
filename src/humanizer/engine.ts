@@ -3,7 +3,7 @@
  *
  * The engine routes tool calls to page.mouse / page.keyboard / locator methods.
  * Backend-level humanization comes from the launched browser config
- * (cloakbrowser humanize patches or Camoufox options), not from a local timing
+ * (cloakbrowser humanize patches), not from a local timing
  * model in proxy-mcp.
  */
 

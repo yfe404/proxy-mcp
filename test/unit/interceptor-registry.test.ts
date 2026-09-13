@@ -65,10 +65,7 @@ class FakeBrowserInterceptor implements Interceptor {
 const REGISTERED_IDS = [
   "terminal",
   "browser",
-  "android-adb",
-  "android-frida",
   "docker",
-  "camoufox",
 ];
 
 describe("interceptor registry across MCP sessions", () => {

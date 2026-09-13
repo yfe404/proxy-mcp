@@ -1,7 +1,7 @@
 /**
  * Interceptor interface and shared types.
  *
- * Each interceptor manages a specific target type (Chrome, Android, Docker, etc.)
+ * Each interceptor manages a specific target type (browser, process, container)
  * and handles proxy configuration + certificate trust automatically.
  */
 
@@ -10,13 +10,13 @@ export interface InterceptorMetadata {
   id: string;
   name: string;
   description: string;
-  /** Whether the required tooling (adb, docker, chrome, etc.) is available. */
+  /** Whether the required tooling (the browser binary, docker, etc.) is available. */
   isActivable: boolean;
   /** Currently active targets managed by this interceptor. */
   activeTargets: ActiveTarget[];
 }
 
-/** A single active interception target (a Chrome instance, an Android device, etc.). */
+/** A single active interception target (a browser instance, a container, etc.). */
 export interface ActiveTarget {
   id: string;
   description: string;

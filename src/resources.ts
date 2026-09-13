@@ -6,7 +6,6 @@ import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/serv
 import { proxyManager } from "./state.js";
 import { interceptorManager } from "./interceptors/manager.js";
 import type { BrowserInterceptor } from "./interceptors/browser.js";
-import type { CamoufoxInterceptor } from "./interceptors/camoufox.js";
 
 export function registerResources(server: McpServer): void {
   server.resource(
@@ -365,46 +364,6 @@ export function registerResources(server: McpServer): void {
               interceptorName: meta.name,
               activeCount: meta.activeTargets.length,
               targets,
-            },
-          }, null, 2),
-        }],
-      };
-    },
-  );
-
-  server.resource(
-    "proxy_camoufox_targets",
-    "proxy://camoufox/targets",
-    async (uri) => {
-      const fox = interceptorManager.get("camoufox") as CamoufoxInterceptor | undefined;
-      const proxy = {
-        running: proxyManager.isRunning(),
-        port: proxyManager.getPort(),
-        certFingerprint: proxyManager.getCert()?.fingerprint ?? null,
-      };
-
-      if (!fox) {
-        return {
-          contents: [{
-            uri: uri.href,
-            text: JSON.stringify({ proxy, camoufox: { error: "Camoufox interceptor not registered.", targets: [] } }, null, 2),
-          }],
-        };
-      }
-
-      const meta = await fox.getMetadata();
-
-      return {
-        contents: [{
-          uri: uri.href,
-          text: JSON.stringify({
-            proxy,
-            camoufox: {
-              interceptorId: meta.id,
-              interceptorName: meta.name,
-              isActivable: meta.isActivable,
-              activeCount: meta.activeTargets.length,
-              targets: meta.activeTargets,
             },
           }, null, 2),
         }],

@@ -1,6 +1,6 @@
 {
   "name": "proxy-mcp",
-  "version": "3.4.1",
+  "version": "3.5.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yfe404/proxy-mcp.git"
@@ -18,7 +18,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && node -e \"require('fs').cpSync('src/frida-scripts/vendor','dist/frida-scripts/vendor',{recursive:true})\"",
+    "build": "tsc",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
@@ -30,9 +30,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "cloakbrowser": "^0.3.24",
+    "cloakbrowser": "^0.5.10",
     "dockerode": "^4.0.4",
-    "frida-js": "^0.4.0",
     "impit": "^0.13.0",
     "mockttp": "^3.17.0",
     "playwright-core": "^1.59.1",

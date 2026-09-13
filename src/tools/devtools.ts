@@ -2,8 +2,8 @@
  * Browser DevTools-equivalent MCP tools — Playwright-driven.
  *
  * Replaces the former chrome-devtools-mcp sidecar + CDP bridge. Each tool
- * takes a target_id from interceptor_browser_launch or
- * interceptor_camoufox_launch and drives the bound Playwright Page directly.
+ * takes a target_id from interceptor_browser_launch and drives the bound
+ * Playwright Page directly.
  *
  * Tools exposed:
  *   interceptor_browser_snapshot          — a11y tree
@@ -33,7 +33,6 @@ import {
   getContextForTarget,
   getEntry,
   getPageForTarget,
-  isCamoufoxTarget,
 } from "../browser/session.js";
 
 function errorToString(e: unknown): string {
@@ -116,7 +115,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "Take an ARIA accessibility snapshot of the bound page (YAML-formatted role tree). " +
     "Great for LLM-driven page understanding without parsing HTML.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       selector: z.string().optional().default("body").describe("Root selector to snapshot (default: 'body')"),
       mode: z.enum(["default", "ai"]).optional().default("default").describe("Snapshot mode — 'ai' adds ref attributes for locator reuse"),
     },
@@ -149,7 +148,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "interceptor_browser_screenshot",
     "Take a screenshot of the bound page. Saves to file_path if provided; otherwise reports byte count without embedding the image.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       file_path: z.string().optional().describe("Optional path to save screenshot"),
       format: z.enum(["png", "jpeg"]).optional().default("png").describe("Image format (default: png)"),
       full_page: z.boolean().optional().default(false).describe("Capture the full scrollable page"),
@@ -196,7 +195,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "interceptor_browser_list_console",
     "List console messages buffered since the browser was launched. Types: log, info, warning, error, debug, etc.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       types: z.array(z.string()).optional().describe("Filter by console message types"),
       text_filter: z.string().optional().describe("Filter by text substring"),
       offset: z.number().optional().default(0).describe("Offset into results (default: 0)"),
@@ -244,7 +243,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "interceptor_browser_list_cookies",
     "List cookies from the browser context with pagination and truncated value previews.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       url_filter: z.string().optional().describe("Filter cookies by domain/path substring"),
       domain_filter: z.string().optional().describe("Filter cookies by domain substring"),
       name_filter: z.string().optional().describe("Filter cookies by name substring"),
@@ -333,7 +332,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "interceptor_browser_get_cookie",
     "Get one cookie by cookie_id with full value (subject to a hard cap to keep output bounded).",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       cookie_id: z.string().describe("cookie_id from interceptor_browser_list_cookies"),
       value_max_chars: z.number().optional().default(HARD_VALUE_CAP_CHARS)
         .describe(`Max characters for cookie value (default: ${HARD_VALUE_CAP_CHARS})`),
@@ -373,7 +372,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "interceptor_browser_list_storage_keys",
     "List localStorage/sessionStorage keys for the current origin with pagination and truncated value previews.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       storage_type: z.enum(["local", "session"]).describe("Storage type"),
       origin: z.string().optional().describe("Optional origin override (must match current page origin)"),
       key_filter: z.string().optional().describe("Filter by key substring"),
@@ -454,7 +453,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "interceptor_browser_get_storage_value",
     "Get one localStorage/sessionStorage value by item_id.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       storage_type: z.enum(["local", "session"]).describe("Storage type"),
       item_id: z.string().describe("item_id from interceptor_browser_list_storage_keys"),
       origin: z.string().optional().describe("Optional origin override (must match current page origin)"),
@@ -530,7 +529,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "interceptor_browser_list_network_fields",
     "List request/response header fields from proxy-captured traffic since the browser was launched, with pagination and truncation.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       direction: z.enum(["request", "response", "both"]).optional().default("both").describe("Header direction (default: both)"),
       header_name_filter: z.string().optional().describe("Filter by header name substring"),
       method_filter: z.string().optional().describe("Filter by HTTP method"),
@@ -645,7 +644,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "interceptor_browser_get_network_field",
     "Get one full header field value from proxy-captured traffic by field_id.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       field_id: z.string().describe("field_id from interceptor_browser_list_network_fields"),
       value_max_chars: z.number().optional().default(HARD_VALUE_CAP_CHARS)
         .describe(`Max characters for returned value (default: ${HARD_VALUE_CAP_CHARS})`),
@@ -716,54 +715,27 @@ export function registerDevToolsTools(server: McpServer): void {
     "Source is loaded from `script_path` (absolute path). The file body is wrapped in an arrow " +
     "function receiving `__args` (so the file may `return value;` directly and access the optional " +
     "args object). " +
-    "Worlds: `isolated` (default) or `main` (camoufox-only, requires `main_world_eval: true` at launch). " +
-    "Cloakbrowser (Chromium): `isolated` runs in Playwright's utility world (different `window`, same DOM). " +
-    "`main` is rejected — use `interceptor_browser_inject_init_script` for main-world patching there. " +
-    "Camoufox (cloverlabs/FF150): there is no separate isolated world — both permitted modes run in the page's main world. " +
-    "Reads are invisible to the page; mutations (`window.x = …`, `Object.defineProperty`, prototype patches) are observable by page scripts. " +
-    "Earlier daijro/FF135 had a Juggler scope that made `isolated` invisible to the page; that scope was removed in cloverlabs. " +
-    "Verify on your installed build with `scripts/camoufox-world-probe.ts`. " +
-    "Rate-limit on cloakbrowser before reCAPTCHA: each call emits CDP traffic that behavioural scorers count.",
+    "Runs in Playwright's isolated utility world (different `window`, same DOM). Reads are invisible " +
+    "to the page; mutations to shared prototypes/globals are observable by page scripts. " +
+    "For main-world patching use `interceptor_browser_inject_init_script`. " +
+    "Rate-limit before reCAPTCHA: each call emits CDP traffic that behavioural scorers count.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       script_path: z.string().describe("Absolute path to a .js file. File body is the function body; use `return` to send a value back."),
       args: z.record(z.unknown()).optional().describe("Optional JSON-serialisable args object, available inside the script as `__args`."),
-      world: z.enum(["isolated", "main"]).optional().default("isolated")
-        .describe("`isolated` (default) or `main`. On current camoufox build (cloverlabs/FF150) both run in the page's main world — arg is accepted but has no observable effect."),
       value_max_chars: z.number().optional().default(HARD_VALUE_CAP_CHARS)
         .describe(`Max characters of the JSON-stringified return value (default: ${HARD_VALUE_CAP_CHARS}).`),
     },
-    async ({ target_id, script_path, args, world, value_max_chars }) => {
+    async ({ target_id, script_path, args, value_max_chars }) => {
       try {
         if (!isAbsolute(script_path)) {
           return { content: [{ type: "text", text: JSON.stringify({ status: "error", error: `script_path must be absolute: '${script_path}'` }) }] };
         }
         const source = await readFile(script_path, "utf-8");
         const page = await getPageForTarget(target_id);
-        const isCamoufox = isCamoufoxTarget(target_id);
-
-        if (world === "main") {
-          if (!isCamoufox) {
-            return { content: [{ type: "text", text: JSON.stringify({
-              status: "error",
-              error: "world: 'main' is only supported on camoufox targets. On cloakbrowser, use interceptor_browser_inject_init_script for main-world patching.",
-            }) }] };
-          }
-          const entry = getEntry(target_id);
-          const mwEnabled = Boolean((entry.target.details as { main_world_eval?: boolean } | undefined)?.main_world_eval);
-          if (!mwEnabled) {
-            return { content: [{ type: "text", text: JSON.stringify({
-              status: "error",
-              error: "Camoufox target launched without main_world_eval=true; main-world evaluate is disabled. Relaunch with `main_world_eval: true`.",
-            }) }] };
-          }
-        }
 
         const argsLiteral = JSON.stringify(args ?? {});
-        const fnExpr = `((__args) => { ${source}\n })(${argsLiteral})`;
-        const pageFunction = world === "main" && isCamoufox ? `mw:${fnExpr}` : fnExpr;
-
-        const result = await page.evaluate(pageFunction);
+        const result = await page.evaluate(`((__args) => { ${source}\n })(${argsLiteral})`);
         const serialised = result === undefined ? "" : JSON.stringify(result);
         const capped = capValue(serialised, Math.max(0, Math.min(HARD_VALUE_CAP_CHARS, Math.trunc(value_max_chars ?? HARD_VALUE_CAP_CHARS))));
 
@@ -773,8 +745,7 @@ export function registerDevToolsTools(server: McpServer): void {
             text: truncateResult({
               status: "success",
               target_id,
-              world,
-              backend: isCamoufox ? "camoufox" : "cloakbrowser",
+              world: "isolated",
               value: capped.value,
               value_length: capped.valueLength,
               value_truncated: capped.truncated,
@@ -792,13 +763,10 @@ export function registerDevToolsTools(server: McpServer): void {
     "interceptor_browser_inject_init_script",
     "Inject a JS file as an init script (Playwright `page.addInitScript`). " +
     "Runs before any page script on every subsequent navigation/frame. " +
-    "Cloakbrowser (Chromium): runs in the isolated utility world — no DOM artifact; patches to shared prototypes/globals reach the page main world via utility-world sharing. " +
-    "Camoufox (cloverlabs/FF150): runs directly in the page's main world. Patches (e.g. `Object.defineProperty(navigator, 'webdriver', ...)`) DO apply to the page, but are observable by anti-bot code on the page (`Function.prototype.toString` leak applies). " +
-    "For Camoufox stealth, prefer source-level fingerprint config at launch (`os`, `webgl_config`, `fonts`, `humanize`, …) over JS injection. " +
-    "Earlier daijro/FF135 ran init scripts in a Juggler scope that did NOT reach the page (camoufox#48); cloverlabs/FF150 removed that scope. " +
+    "Runs in the isolated utility world — no DOM artifact; patches to shared prototypes/globals reach the page main world via utility-world sharing. " +
     "Does NOT affect the currently loaded document — navigate again to apply.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       script_path: z.string().describe("Absolute path to a .js file to inject before page scripts on every load."),
     },
     async ({ target_id, script_path }) => {
@@ -809,18 +777,14 @@ export function registerDevToolsTools(server: McpServer): void {
         const source = await readFile(script_path, "utf-8");
         const page = await getPageForTarget(target_id);
         await page.addInitScript({ content: source });
-        const isCamoufox = isCamoufoxTarget(target_id);
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
               status: "success",
               target_id,
-              backend: isCamoufox ? "camoufox" : "cloakbrowser",
               bytes: source.length,
-              note: isCamoufox
-                ? "Camoufox (cloverlabs/FF150): init script runs in the page's main world — patches reach the page but are observable by page scripts. Apply on next navigation."
-                : "Applies on next navigation/frame, not the current document.",
+              note: "Applies on next navigation/frame, not the current document.",
             }),
           }],
         };
@@ -836,7 +800,7 @@ export function registerDevToolsTools(server: McpServer): void {
     "WARNING: injects a real DOM node visible to MutationObserver, document.scripts, and CSP. " +
     "Avoid for anti-bot stealth — prefer interceptor_browser_inject_init_script (no DOM node) when you need page-scope execution.",
     {
-      target_id: z.string().describe("Target ID from interceptor_browser_launch or interceptor_camoufox_launch"),
+      target_id: z.string().describe("Target ID from interceptor_browser_launch"),
       script_path: z.string().describe("Absolute path to a .js file to inject as <script>."),
       script_type: z.enum(["classic", "module"]).optional().default("classic")
         .describe("`classic` (default) or `module`."),
@@ -855,7 +819,6 @@ export function registerDevToolsTools(server: McpServer): void {
             text: JSON.stringify({
               status: "success",
               target_id,
-              backend: isCamoufoxTarget(target_id) ? "camoufox" : "cloakbrowser",
               bytes: source.length,
               script_type,
               warning: "DOM-visible injection. Detectable by MutationObserver/document.scripts/CSP.",

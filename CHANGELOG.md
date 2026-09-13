@@ -1,5 +1,74 @@
 # Changelog
 
+## 3.5.0 — 2026-09-13
+
+### Removed (breaking)
+
+The mobile capture stack, the Android/Frida device tooling and the Camoufox
+backend are gone. proxy-mcp is now an explicit HTTP/HTTPS MITM proxy with three
+interceptors: `terminal`, `browser` (cloakbrowser stealth Chromium) and
+`docker`.
+
+- Tools removed: `proxy_start_transparent`, `proxy_stop_transparent`,
+  `proxy_transparent_status`, `proxy_mobile_setup`, `proxy_mobile_teardown`,
+  `proxy_mobile_detect_iface`, `interceptor_android_devices`,
+  `interceptor_android_activate`, `interceptor_android_deactivate`,
+  `interceptor_android_setup`, `interceptor_frida_apps`,
+  `interceptor_frida_attach`, `interceptor_frida_detach`,
+  `interceptor_camoufox_launch`, `interceptor_camoufox_info`,
+  `interceptor_camoufox_list`, `interceptor_camoufox_close`. 72 tools remain.
+- Interceptors removed: `android-adb`, `android-frida`, `camoufox`.
+  `interceptor_list` now reports exactly `terminal`, `browser`, `docker`.
+- Resource removed: `proxy://camoufox/targets`.
+- `interceptor_browser_evaluate` loses its `world` argument. `world: "main"`
+  only ever did anything on Camoufox targets; the tool now always runs in
+  Playwright's isolated utility world. Use
+  `interceptor_browser_inject_init_script` for main-world patching.
+- Transparent proxying is removed as a feature, not just as a tool file:
+  `ProxyManager.startTransparent`/`stopTransparent`/`getTransparentStatus` and
+  the second mockttp listener are gone, `proxy_status` no longer reports a
+  `transparentProxy` block, and `proxy_list_traffic` loses its `source_filter`
+  argument and the `source` field on each entry (every exchange came from the
+  explicit listener once the transparent one was gone).
+- The `frida-js` dependency and `src/frida-scripts/` are gone, so `npm run
+  build` is plain `tsc` again with nothing to copy into `dist/`.
+
+### Changed
+
+- **cloakbrowser 0.3.24 → 0.5.10.** Every `launchContext` option this repo
+  passes (`headless`, `proxy`, `args`, `humanize`, `humanPreset`, `timezone`,
+  `locale`, `viewport`) keeps its name and shape, so no call-site change was
+  needed. One upstream behaviour change reaches `interceptor_browser_launch`:
+  since 0.4.0 a headed launch with no explicit viewport gets `viewport: null`
+  (the page tracks the real window) instead of a forced 1920x947, and since
+  0.4.6 the same applies headless on browser builds newer than 148. Nothing in
+  proxy-mcp reads `page.viewportSize()`, and passing `viewport_width` +
+  `viewport_height` still pins a fixed viewport. cloakbrowser 0.4.0 also
+  dropped its `patchright` backend, which proxy-mcp never used.
+
+### Known behaviour
+
+- **An IPv6-only host is unreachable from a container with no IPv6 route, and
+  no proxy-side setting changes that.** Measured on the Apify platform
+  (`node:22-bookworm-slim`) while driving a cloakbrowser page at
+  `https://www.alza.cz/` through the proxy: mockttp's passthrough failed a
+  handful of upstream connections per page with
+  `connect ENETUNREACH 2606:4700::…:443`, and
+  `NODE_OPTIONS=--dns-result-order=ipv4first` changed nothing.
+
+  Every one of those errors came from `brunhild.challenges.cloudflare.com`, a
+  Cloudflare challenge asset that publishes AAAA records and **no A record**.
+  Node was not mis-ordering a dual-stack answer — there was no IPv4 address to
+  choose, which is why result order was irrelevant. Forcing the upstream
+  resolver to A records only was prototyped and measured: it takes the
+  `ENETUNREACH` count from 6 to 0, but only by turning the same failed request
+  into a `getaddrinfo ENOTFOUND`. It does not make the asset load, so it was
+  not shipped. Requests to dual-stack hosts were never affected — they already
+  fall back to IPv4 through Happy Eyeballs.
+
+  If you need those assets, give the container an IPv6 route or an upstream
+  proxy that has one.
+
 ## 3.4.1 — 2026-09-13
 
 - **Browser targets survive across MCP sessions** (#25). The HTTP transport
