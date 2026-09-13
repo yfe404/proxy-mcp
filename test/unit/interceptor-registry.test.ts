@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { initInterceptors } from "../../src/interceptors/init.js";
-import { interceptorManager } from "../../src/interceptors/manager.js";
+import { InterceptorManager, interceptorManager } from "../../src/interceptors/manager.js";
 import type { ActivateResult, Interceptor, InterceptorMetadata } from "../../src/interceptors/types.js";
 
 /**
@@ -19,24 +19,27 @@ import type { ActivateResult, Interceptor, InterceptorMetadata } from "../../src
  */
 
 /**
- * Stands in for the BrowserInterceptor holding a live target across sessions.
+ * Stands in for an interceptor holding live targets, without launching one.
  *
- * It takes the real `browser` id deliberately: a second initInterceptors()
- * that re-registered would overwrite this instance and lose `launched` — the
- * reported failure. Registering under a private id instead would prove
- * nothing, since initInterceptors never touches such an id either way.
+ * `launched` is the live handle a real interceptor would hold: the tests below
+ * assert it survives a second init, a refused re-registration and another
+ * session's teardown.
  */
-class FakeBrowserInterceptor implements Interceptor {
-  readonly id = "browser";
-  readonly name = "Fake browser";
+class FakeInterceptor implements Interceptor {
+  readonly id: string;
+  readonly name = "Fake interceptor";
   readonly launched: string[] = [];
+
+  constructor(id: string) {
+    this.id = id;
+  }
 
   async isActivable(): Promise<boolean> {
     return true;
   }
 
   async activate(): Promise<ActivateResult> {
-    const targetId = `browser_${this.launched.length}`;
+    const targetId = `${this.id}_${this.launched.length}`;
     this.launched.push(targetId);
     return { targetId, details: {} };
   }
@@ -75,19 +78,7 @@ describe("interceptor registry across MCP sessions", () => {
     for (const id of REGISTERED_IDS) {
       assert.ok(interceptorManager.get(id), `${id} should be registered after the first init`);
     }
-
-    // Swap the browser interceptor for a fake so a launched target can be
-    // asserted without starting Chromium, and snapshot every instance.
-    const fake = new FakeBrowserInterceptor();
-    interceptorManager.register(fake);
     const sessionA = new Map(REGISTERED_IDS.map((id) => [id, interceptorManager.get(id)]));
-
-    // Session A launches a target; the handle lives on the registered instance.
-    const { targetId } = await interceptorManager.activate("browser", {
-      proxyPort: 1,
-      certPem: "",
-      certFingerprint: "",
-    });
 
     // Session B starts in the same process.
     initInterceptors();
@@ -97,9 +88,90 @@ describe("interceptor registry across MCP sessions", () => {
     for (const [id, interceptor] of sessionA) {
       assert.equal(interceptorManager.get(id), interceptor, `${id} was replaced by the second init`);
     }
+  });
 
-    // Session B can still reach the target session A launched.
-    const seen = interceptorManager.get("browser") as FakeBrowserInterceptor;
-    assert.deepEqual(seen.launched, [targetId]);
+  /**
+   * #26: the #25 fix guards initInterceptors(), the single call site. Making
+   * register() itself refuse a duplicate makes the invariant structural, so no
+   * future call site can silently orphan a live target.
+   */
+  it("refuses to re-register an id instead of dropping the live instance", async () => {
+    initInterceptors();
+    const registered = interceptorManager.get("browser");
+    assert.ok(registered);
+
+    assert.throws(
+      () => interceptorManager.register(new FakeInterceptor("browser")),
+      /already registered/,
+    );
+
+    // The original instance, and everything it holds, is untouched.
+    assert.equal(interceptorManager.get("browser"), registered);
+  });
+});
+
+/**
+ * Regression for #26.1.
+ *
+ * proxyManager is a process singleton and its stop() called deactivateAll(),
+ * so in HTTP mode one client's proxy_stop closed the browsers launched by
+ * every other MCP session. Targets now record the session that activated them.
+ *
+ * A private manager instance keeps the singleton's real interceptors out of it.
+ */
+describe("interceptor ownership per MCP session", () => {
+  const options = { proxyPort: 1, certPem: "", certFingerprint: "" };
+
+  function twoSessionSetup() {
+    const manager = new InterceptorManager();
+    const browser = new FakeInterceptor("browser");
+    const docker = new FakeInterceptor("docker");
+    manager.register(browser);
+    manager.register(docker);
+    return { manager, browser, docker };
+  }
+
+  it("records the activating session and deactivates only that session's targets", async () => {
+    const { manager, browser, docker } = twoSessionSetup();
+
+    const a = await manager.activate("browser", options, "session-a");
+    const b = await manager.activate("browser", options, "session-b");
+    const dockerB = await manager.activate("docker", options, "session-b");
+
+    assert.equal(manager.ownerOf("browser", a.targetId), "session-a");
+    assert.equal(manager.ownerOf("browser", b.targetId), "session-b");
+
+    const deactivated = await manager.deactivateOwnedBy("session-a");
+
+    assert.equal(deactivated, 1);
+    assert.deepEqual(browser.launched, [b.targetId], "session B's browser must survive session A's stop");
+    assert.deepEqual(docker.launched, [dockerB.targetId], "session B's container must survive too");
+    assert.equal(manager.ownerOf("browser", a.targetId), undefined);
+  });
+
+  it("leaves stdio targets (no session id) running when one session stops", async () => {
+    const { manager, browser } = twoSessionSetup();
+
+    const stdio = await manager.activate("browser", options);
+    const owned = await manager.activate("browser", options, "session-a");
+    assert.equal(manager.ownerOf("browser", stdio.targetId), undefined);
+
+    await manager.deactivateOwnedBy("session-a");
+    assert.deepEqual(browser.launched, [stdio.targetId]);
+
+    // deactivateAll stays process-wide: it is what stdio and `all: true` use.
+    await manager.deactivateAll();
+    assert.deepEqual(browser.launched, []);
+    assert.equal(manager.ownerOf("browser", owned.targetId), undefined);
+  });
+
+  it("forgets the owner when a target is deactivated by id", async () => {
+    const { manager } = twoSessionSetup();
+    const a = await manager.activate("browser", options, "session-a");
+
+    await manager.deactivate("browser", a.targetId);
+
+    assert.equal(manager.ownerOf("browser", a.targetId), undefined);
+    assert.equal(await manager.deactivateOwnedBy("session-a"), 0);
   });
 });

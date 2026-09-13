@@ -93,6 +93,9 @@ node dist/index.js --transport http --port 3001
 
 `--transport` and `--port` also accept env vars `TRANSPORT` and `PORT`.
 
+`PROXY_MCP_DEBUG=1` adds debug lines to stderr, one per request the client
+cancels: `request aborted by client: <method> <url>`.
+
 `PROXY_MCP_UPSTREAM_PASSWORD` and `PROXY_MCP_UPSTREAM_HOST` keep an upstream
 proxy password out of the transcript — see
 [Keeping the upstream password out of the transcript](#keeping-the-upstream-password-out-of-the-transcript).
@@ -448,7 +451,7 @@ Browser automation uses [cloakbrowser](https://cloakbrowser.dev/) for stealth-pa
 | Tool | Description |
 |------|-------------|
 | `proxy_start` | Start MITM proxy, auto-generate CA cert |
-| `proxy_stop` | Stop proxy (traffic/cert retained) |
+| `proxy_stop` | Stop proxy (traffic/cert retained). Deactivates this MCP session's interceptor targets; `all: true` deactivates every session's |
 | `proxy_status` | Running state, port, rule/traffic counts |
 | `proxy_get_ca_cert` | CA certificate PEM + SPKI fingerprint |
 
