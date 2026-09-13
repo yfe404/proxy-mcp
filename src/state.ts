@@ -1215,6 +1215,9 @@ export class ProxyManager {
                 }
               }
 
+              // Note: impit resolves DNS itself and takes no address-family
+              // option, so PROXY_MCP_UPSTREAM_IPV4_ONLY does not reach this
+              // path — a spoofed request can still pick an AAAA record.
               const result = await spoofedRequest(req.url, {
                 method: req.method,
                 headers: applyFingerprintHeaderOverrides(

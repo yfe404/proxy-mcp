@@ -103,7 +103,10 @@ host with no IPv6 route — an Apify Actor container, for instance — that stop
 requests to dual-stack hosts from stalling on an unroutable AAAA address. It
 does not make an AAAA-only host reachable: such a request fails as
 `getaddrinfo ENOTFOUND` instead of `connect ENETUNREACH`. Set the variable to
-`0` (or `false`/`no`/`off`) to restore mockttp's own resolver.
+`0` (or `false`/`no`/`off`) to restore mockttp's own resolver. It applies to
+every request the proxy forwards itself, but not to requests answered through
+JA3 spoofing (`proxy_set_ja3_spoof`) — impit resolves those itself and takes no
+address-family option.
 
 ### Manual MCP configuration
 

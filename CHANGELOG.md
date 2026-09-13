@@ -67,6 +67,12 @@ interceptors: `terminal`, `browser` (cloakbrowser stealth Chromium) and
   and still worth having: a host that publishes both A and AAAA records is
   always reached over IPv4, so it can never stall on an unroutable address.
 
+  Scope: the flag covers every request mockttp forwards itself — the default
+  passthrough and every user rule's passthrough/forward. It does **not** cover
+  the JA3-spoof path: when `proxy_set_ja3_spoof` matches a host the response
+  comes from impit, which resolves DNS inside its own Rust client and exposes
+  no address-family option, so those requests can still pick an AAAA record.
+
   mockttp 3.17's public `lookupOptions` carries only cacheable-lookup settings
   and has no hook for supplying a lookup function, so `src/upstream-dns.ts`
   seeds the memo cache behind mockttp's `getDnsLookupFunction` under a private

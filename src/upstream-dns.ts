@@ -27,6 +27,12 @@
  *
  * Off switch: PROXY_MCP_UPSTREAM_IPV4_ONLY=0 (also false/no/off).
  *
+ * Scope: this covers every request mockttp forwards itself. It does NOT cover
+ * the JA3-spoof path — when `proxy_set_ja3_spoof` matches a host, state.ts
+ * answers from impit (src/tls-spoof.ts), which resolves DNS inside its own
+ * Rust client and exposes no address-family option, so those requests can
+ * still pick an AAAA record.
+ *
  * Trade-off: with the flag on, a host that publishes only AAAA records becomes
  * unreachable through the proxy even where IPv6 works. That is the intended
  * exchange on IPv4-only infrastructure, and it is why the flag exists.
